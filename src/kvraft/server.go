@@ -24,7 +24,7 @@ type Op struct {
 	// otherwise RPC will break.
 }
 
-type RaftKV struct {
+type KVServer struct {
 	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
@@ -36,21 +36,21 @@ type RaftKV struct {
 }
 
 
-func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 }
 
-func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 }
 
 //
-// the tester calls Kill() when a RaftKV instance won't
+// the tester calls Kill() when a KVServer instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
 //
-func (kv *RaftKV) Kill() {
+func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 }
@@ -68,12 +68,12 @@ func (kv *RaftKV) Kill() {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *RaftKV {
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 
-	kv := new(RaftKV)
+	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 

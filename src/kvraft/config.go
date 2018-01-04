@@ -37,7 +37,7 @@ type config struct {
 	tag          string
 	net          *labrpc.Network
 	n            int
-	kvservers    []*RaftKV
+	kvservers    []*KVServer
 	saved        []*raft.Persister
 	endnames     [][]string // names of each server's sending ClientEnds
 	clerks       map[*Clerk][]string
@@ -346,7 +346,7 @@ func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate 
 	cfg.tag = tag
 	cfg.net = labrpc.MakeNetwork()
 	cfg.n = n
-	cfg.kvservers = make([]*RaftKV, cfg.n)
+	cfg.kvservers = make([]*KVServer, cfg.n)
 	cfg.saved = make([]*raft.Persister, cfg.n)
 	cfg.endnames = make([][]string, cfg.n)
 	cfg.clerks = make(map[*Clerk][]string)
