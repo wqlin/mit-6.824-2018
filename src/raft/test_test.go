@@ -123,9 +123,9 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
-	cfg.one(106, servers, false)
+	cfg.one(106, servers, true)
 	time.Sleep(RaftElectionTimeout)
-	cfg.one(107, servers, false)
+	cfg.one(107, servers, true)
 
 	fmt.Printf("  ... Passed\n")
 }
