@@ -12,6 +12,8 @@ import "sync"
 import "runtime"
 import "raft"
 import "fmt"
+import "time"
+import "sync/atomic"
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -43,6 +45,11 @@ type config struct {
 	clerks       map[*Clerk][]string
 	nextClientId int
 	maxraftstate int
+	testNum      int32 // for two-minute timeout
+	// begin()/end() statistics
+	t0    time.Time // time at which test_test.go called cfg.begin()
+	rpcs0 int       // rpcTotal() at start of test
+	cmds0 int       // number of agreements
 }
 
 func (cfg *config) cleanup() {
@@ -363,4 +370,44 @@ func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate 
 	cfg.net.Reliable(!unreliable)
 
 	return cfg
+}
+
+func (cfg *config) rpcTotal() int {
+	return cfg.net.GetTotalCount()
+}
+
+// start a Test.
+// print the Test message.
+// e.g. cfg.begin("Test (2B): RPC counts aren't too high")
+func (cfg *config) begin(description string) {
+	fmt.Printf("%s ...\n", description)
+	cfg.t0 = time.Now()
+	cfg.rpcs0 = cfg.rpcTotal()
+	cfg.cmds0 = 0
+
+	// enforce a two minute real-time limit on each test.
+	num := atomic.AddInt32(&cfg.testNum, 1)
+	go func() {
+		time.Sleep(time.Second * 120)
+		if num == atomic.LoadInt32(&cfg.testNum) {
+			cfg.t.Fatalf("test took longer than 120 seconds")
+		}
+	}()
+}
+
+// end a Test -- the fact that we got here means there
+// was no failure.
+// print the Passed message,
+// and some performance numbers.
+func (cfg *config) end() {
+	atomic.AddInt32(&cfg.testNum, 1) // suppress two-minute timeout
+
+	if cfg.t.Failed() == false {
+		t := time.Since(cfg.t0).Seconds()  // real time
+		npeers := cfg.n                    // number of Raft peers
+		nrpc := cfg.rpcTotal() - cfg.rpcs0 // number of RPC sends
+
+		fmt.Printf("  ... Passed --")
+		fmt.Printf("  %4.1f  %d %4d\n", t, npeers, nrpc)
+	}
 }

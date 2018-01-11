@@ -58,6 +58,7 @@ import "log"
 import "strings"
 import "math/rand"
 import "time"
+import "sync/atomic"
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -117,6 +118,7 @@ type Network struct {
 	servers        map[interface{}]*Server     // servers, by name
 	connections    map[interface{}]interface{} // endname -> servername
 	endCh          chan reqMsg
+	count          int32 // total RPC count, for statistics
 }
 
 func MakeNetwork() *Network {
@@ -131,6 +133,7 @@ func MakeNetwork() *Network {
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
 		for xreq := range rn.endCh {
+			atomic.AddInt32(&rn.count, 1)
 			go rn.ProcessReq(xreq)
 		}
 	}()
@@ -329,6 +332,11 @@ func (rn *Network) GetCount(servername interface{}) int {
 
 	svr := rn.servers[servername]
 	return svr.GetCount()
+}
+
+func (rn *Network) GetTotalCount() int {
+	x := atomic.LoadInt32(&rn.count)
+	return int(x)
 }
 
 //

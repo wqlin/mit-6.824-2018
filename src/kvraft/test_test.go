@@ -3,7 +3,6 @@ package raftkv
 import "testing"
 import "strconv"
 import "time"
-import "fmt"
 import "math/rand"
 import "log"
 import "strings"
@@ -128,9 +127,34 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 // maxraftstate is a positive number, the size of the state for Raft (i.e., log
 // size) shouldn't exceed 2*maxraftstate.
 func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash bool, partitions bool, maxraftstate int) {
+
+	title := "Test: "
+	if unreliable {
+		// the network drops RPC requests and replies.
+		title = title + "unreliable net, "
+	}
+	if crash {
+		// peers re-start, and thus persistence must work.
+		title = title + "restarts, "
+	}
+	if partitions {
+		// the network may partition
+		title = title + "partitions, "
+	}
+	if maxraftstate != -1 {
+		title = title + "snapshots, "
+	}
+	if nclients > 1 {
+		title = title + "many clients"
+	} else {
+		title = title + "one client"
+	}
+
 	const nservers = 5
 	cfg := make_config(t, tag, nservers, unreliable, maxraftstate)
 	defer cfg.cleanup()
+
+	cfg.begin(title)
 
 	ck := cfg.makeClient(cfg.All())
 
@@ -230,21 +254,18 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		}
 	}
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 }
 
 func TestBasic3A(t *testing.T) {
-	fmt.Printf("Test: One client ...\n")
 	GenericTest(t, "basic", 1, false, false, false, -1)
 }
 
 func TestConcurrent3A(t *testing.T) {
-	fmt.Printf("Test: concurrent clients ...\n")
 	GenericTest(t, "concur", 5, false, false, false, -1)
 }
 
 func TestUnreliable3A(t *testing.T) {
-	fmt.Printf("Test: unreliable ...\n")
 	GenericTest(t, "unreliable", 5, true, false, false, -1)
 }
 
@@ -255,7 +276,7 @@ func TestUnreliableOneKey3A(t *testing.T) {
 
 	ck := cfg.makeClient(cfg.All())
 
-	fmt.Printf("Test: Concurrent Append to same key, unreliable ...\n")
+	cfg.begin("Test: concurrent append to same key, unreliable")
 
 	ck.Put("k", "")
 
@@ -277,7 +298,7 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	vx := ck.Get("k")
 	checkConcurrentAppends(t, vx, counts)
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 }
 
 // Submit a request in the minority partition and check that the requests
@@ -291,7 +312,7 @@ func TestOnePartition3A(t *testing.T) {
 
 	ck.Put("1", "13")
 
-	fmt.Printf("Test: Progress in majority ...\n")
+	cfg.begin("Test: progress in majority")
 
 	p1, p2 := cfg.make_partition()
 	cfg.partition(p1, p2)
@@ -303,12 +324,12 @@ func TestOnePartition3A(t *testing.T) {
 	ckp1.Put("1", "14")
 	check(t, ckp1, "1", "14")
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 
 	done0 := make(chan bool)
 	done1 := make(chan bool)
 
-	fmt.Printf("Test: No progress in minority ...\n")
+	cfg.begin("Test: no progress in minority")
 	go func() {
 		ckp2a.Put("1", "15")
 		done0 <- true
@@ -330,9 +351,9 @@ func TestOnePartition3A(t *testing.T) {
 	ckp1.Put("1", "16")
 	check(t, ckp1, "1", "16")
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 
-	fmt.Printf("Test: Completion after heal ...\n")
+	cfg.begin("Test: completion after heal")
 
 	cfg.ConnectAll()
 	cfg.ConnectClient(ckp2a, cfg.All())
@@ -355,41 +376,34 @@ func TestOnePartition3A(t *testing.T) {
 
 	check(t, ck, "1", "15")
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 }
 
 func TestManyPartitionsOneClient3A(t *testing.T) {
-	fmt.Printf("Test: many partitions ...\n")
 	GenericTest(t, "manypartitions", 1, false, false, true, -1)
 }
 
 func TestManyPartitionsManyClients3A(t *testing.T) {
-	fmt.Printf("Test: many partitions, many clients ...\n")
 	GenericTest(t, "manypartitionsclnts", 5, false, false, true, -1)
 }
 
 func TestPersistOneClient3A(t *testing.T) {
-	fmt.Printf("Test: persistence with one client ...\n")
 	GenericTest(t, "persistone", 1, false, true, false, -1)
 }
 
 func TestPersistConcurrent3A(t *testing.T) {
-	fmt.Printf("Test: persistence with concurrent clients ...\n")
 	GenericTest(t, "persistconcur", 5, false, true, false, -1)
 }
 
 func TestPersistConcurrentUnreliable3A(t *testing.T) {
-	fmt.Printf("Test: persistence with concurrent clients, unreliable ...\n")
 	GenericTest(t, "persistconcurunreliable", 5, true, true, false, -1)
 }
 
 func TestPersistPartition3A(t *testing.T) {
-	fmt.Printf("Test: persistence with concurrent clients and repartitioning servers...\n")
 	GenericTest(t, "persistpart", 5, false, true, true, -1)
 }
 
 func TestPersistPartitionUnreliable3A(t *testing.T) {
-	fmt.Printf("Test: persistence with concurrent clients and repartitioning servers, unreliable...\n")
 	GenericTest(t, "persistpartunreliable", 5, true, true, true, -1)
 }
 
@@ -407,7 +421,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	ck := cfg.makeClient(cfg.All())
 
-	fmt.Printf("Test: InstallSnapshot RPC ...\n")
+	cfg.begin("Test: InstallSnapshot RPC")
 
 	ck.Put("a", "A")
 	check(t, ck, "a", "A")
@@ -450,7 +464,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 	check(t, ck, "e", "E")
 	check(t, ck, "1", "1")
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 }
 
 // are the snapshots not too huge? 500 bytes is a generous bound for the
@@ -464,7 +478,7 @@ func TestSnapshotSize3B(t *testing.T) {
 
 	ck := cfg.makeClient(cfg.All())
 
-	fmt.Printf("Test: snapshot size is reasonable ...\n")
+	cfg.begin("Test: snapshot size is reasonable")
 
 	for i := 0; i < 200; i++ {
 		ck.Put("x", "0")
@@ -483,30 +497,25 @@ func TestSnapshotSize3B(t *testing.T) {
 		t.Fatalf("snapshot too large (%v > %v)", cfg.SnapshotSize(), maxsnapshotstate)
 	}
 
-	fmt.Printf("  ... Passed\n")
+	cfg.end()
 }
 
 func TestSnapshotRecover3B(t *testing.T) {
-	fmt.Printf("Test: persistence with one client and snapshots ...\n")
 	GenericTest(t, "snapshot", 1, false, true, false, 1000)
 }
 
 func TestSnapshotRecoverManyClients3B(t *testing.T) {
-	fmt.Printf("Test: persistence with several clients and snapshots ...\n")
 	GenericTest(t, "snapshotunreliable", 20, false, true, false, 1000)
 }
 
 func TestSnapshotUnreliable3B(t *testing.T) {
-	fmt.Printf("Test: persistence with several clients, snapshots, unreliable ...\n")
 	GenericTest(t, "snapshotunreliable", 5, true, false, false, 1000)
 }
 
 func TestSnapshotUnreliableRecover3B(t *testing.T) {
-	fmt.Printf("Test: persistence with several clients, failures, and snapshots, unreliable ...\n")
 	GenericTest(t, "snapshotunreliablecrash", 5, true, true, false, 1000)
 }
 
 func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
-	fmt.Printf("Test: persistence with several clients, failures, and snapshots, unreliable and partitions ...\n")
-	GenericTest(t, "snapshotunreliableconcurpartitions", 5, true, true, true, 1000)
+	GenericTest(t, "surcp", 5, true, true, true, 1000)
 }
