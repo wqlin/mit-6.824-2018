@@ -49,7 +49,7 @@ type config struct {
 	// begin()/end() statistics
 	t0    time.Time // time at which test_test.go called cfg.begin()
 	rpcs0 int       // rpcTotal() at start of test
-	cmds0 int       // number of agreements
+	ops   int32     // number of clerk get/put/append method calls
 }
 
 func (cfg *config) cleanup() {
@@ -383,7 +383,7 @@ func (cfg *config) begin(description string) {
 	fmt.Printf("%s ...\n", description)
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.rpcTotal()
-	cfg.cmds0 = 0
+	atomic.StoreInt32(&cfg.ops, 0)
 
 	// enforce a two minute real-time limit on each test.
 	num := atomic.AddInt32(&cfg.testNum, 1)
@@ -393,6 +393,10 @@ func (cfg *config) begin(description string) {
 			cfg.t.Fatalf("test took longer than 120 seconds")
 		}
 	}()
+}
+
+func (cfg *config) op() {
+	atomic.AddInt32(&cfg.ops, 1)
 }
 
 // end a Test -- the fact that we got here means there
@@ -406,8 +410,9 @@ func (cfg *config) end() {
 		t := time.Since(cfg.t0).Seconds()  // real time
 		npeers := cfg.n                    // number of Raft peers
 		nrpc := cfg.rpcTotal() - cfg.rpcs0 // number of RPC sends
+		ops := atomic.LoadInt32(&cfg.ops)  //  number of clerk get/put/append calls
 
 		fmt.Printf("  ... Passed --")
-		fmt.Printf("  %4.1f  %d %4d\n", t, npeers, nrpc)
+		fmt.Printf("  %4.1f  %d %5d %4d\n", t, npeers, nrpc, ops)
 	}
 }

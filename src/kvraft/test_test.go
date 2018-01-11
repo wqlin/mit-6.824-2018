@@ -12,8 +12,25 @@ import "sync/atomic"
 // (much more than the paper's range of timeouts).
 const electionTimeout = 1 * time.Second
 
-func check(t *testing.T, ck *Clerk, key string, value string) {
+// get/put/putappend that keep counts
+func Get(cfg *config, ck *Clerk, key string) string {
 	v := ck.Get(key)
+	cfg.op()
+	return v
+}
+
+func Put(cfg *config, ck *Clerk, key string, value string) {
+	ck.Put(key, value)
+	cfg.op()
+}
+
+func Append(cfg *config, ck *Clerk, key string, value string) {
+	ck.Append(key, value)
+	cfg.op()
+}
+
+func check(cfg *config, t *testing.T, ck *Clerk, key string, value string) {
+	v := Get(cfg, ck, key)
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
@@ -176,17 +193,17 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			}()
 			last := ""
 			key := strconv.Itoa(cli)
-			myck.Put(key, last)
+			Put(cfg, myck, key, last)
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
-					myck.Append(key, nv)
+					Append(cfg, myck, key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
-					v := myck.Get(key)
+					v := Get(cfg, myck, key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
@@ -241,7 +258,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			// }
 			key := strconv.Itoa(i)
 			// log.Printf("Check %v for client %d\n", j, i)
-			v := ck.Get(key)
+			v := Get(cfg, ck, key)
 			checkClntAppends(t, i, v, j)
 		}
 
@@ -278,14 +295,14 @@ func TestUnreliableOneKey3A(t *testing.T) {
 
 	cfg.begin("Test: concurrent append to same key, unreliable")
 
-	ck.Put("k", "")
+	Put(cfg, ck, "k", "")
 
 	const nclient = 5
 	const upto = 10
 	spawn_clients_and_wait(t, cfg, nclient, func(me int, myck *Clerk, t *testing.T) {
 		n := 0
 		for n < upto {
-			myck.Append("k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y")
+			Append(cfg, myck, "k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y")
 			n++
 		}
 	})
@@ -295,7 +312,7 @@ func TestUnreliableOneKey3A(t *testing.T) {
 		counts = append(counts, upto)
 	}
 
-	vx := ck.Get("k")
+	vx := Get(cfg, ck, "k")
 	checkConcurrentAppends(t, vx, counts)
 
 	cfg.end()
@@ -310,7 +327,7 @@ func TestOnePartition3A(t *testing.T) {
 	defer cfg.cleanup()
 	ck := cfg.makeClient(cfg.All())
 
-	ck.Put("1", "13")
+	Put(cfg, ck, "1", "13")
 
 	cfg.begin("Test: progress in majority")
 
@@ -321,8 +338,8 @@ func TestOnePartition3A(t *testing.T) {
 	ckp2a := cfg.makeClient(p2) // connect ckp2a to p2
 	ckp2b := cfg.makeClient(p2) // connect ckp2b to p2
 
-	ckp1.Put("1", "14")
-	check(t, ckp1, "1", "14")
+	Put(cfg, ckp1, "1", "14")
+	check(cfg, t, ckp1, "1", "14")
 
 	cfg.end()
 
@@ -331,11 +348,11 @@ func TestOnePartition3A(t *testing.T) {
 
 	cfg.begin("Test: no progress in minority")
 	go func() {
-		ckp2a.Put("1", "15")
+		Put(cfg, ckp2a, "1", "15")
 		done0 <- true
 	}()
 	go func() {
-		ckp2b.Get("1") // different clerk in p2
+		Get(cfg, ckp2b, "1") // different clerk in p2
 		done1 <- true
 	}()
 
@@ -347,9 +364,9 @@ func TestOnePartition3A(t *testing.T) {
 	case <-time.After(time.Second):
 	}
 
-	check(t, ckp1, "1", "14")
-	ckp1.Put("1", "16")
-	check(t, ckp1, "1", "16")
+	check(cfg, t, ckp1, "1", "14")
+	Put(cfg, ckp1, "1", "16")
+	check(cfg, t, ckp1, "1", "16")
 
 	cfg.end()
 
@@ -374,7 +391,7 @@ func TestOnePartition3A(t *testing.T) {
 	default:
 	}
 
-	check(t, ck, "1", "15")
+	check(cfg, t, ck, "1", "15")
 
 	cfg.end()
 }
@@ -423,18 +440,18 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	cfg.begin("Test: InstallSnapshot RPC")
 
-	ck.Put("a", "A")
-	check(t, ck, "a", "A")
+	Put(cfg, ck, "a", "A")
+	check(cfg, t, ck, "a", "A")
 
 	// a bunch of puts into the majority partition.
 	cfg.partition([]int{0, 1}, []int{2})
 	{
 		ck1 := cfg.makeClient([]int{0, 1})
 		for i := 0; i < 50; i++ {
-			ck1.Put(strconv.Itoa(i), strconv.Itoa(i))
+			Put(cfg, ck1, strconv.Itoa(i), strconv.Itoa(i))
 		}
 		time.Sleep(electionTimeout)
-		ck1.Put("b", "B")
+		Put(cfg, ck1, "b", "B")
 	}
 
 	// check that the majority partition has thrown away
@@ -448,21 +465,21 @@ func TestSnapshotRPC3B(t *testing.T) {
 	cfg.partition([]int{0, 2}, []int{1})
 	{
 		ck1 := cfg.makeClient([]int{0, 2})
-		ck1.Put("c", "C")
-		ck1.Put("d", "D")
-		check(t, ck1, "a", "A")
-		check(t, ck1, "b", "B")
-		check(t, ck1, "1", "1")
-		check(t, ck1, "49", "49")
+		Put(cfg, ck1, "c", "C")
+		Put(cfg, ck1, "d", "D")
+		check(cfg, t, ck1, "a", "A")
+		check(cfg, t, ck1, "b", "B")
+		check(cfg, t, ck1, "1", "1")
+		check(cfg, t, ck1, "49", "49")
 	}
 
 	// now everybody
 	cfg.partition([]int{0, 1, 2}, []int{})
 
-	ck.Put("e", "E")
-	check(t, ck, "c", "C")
-	check(t, ck, "e", "E")
-	check(t, ck, "1", "1")
+	Put(cfg, ck, "e", "E")
+	check(cfg, t, ck, "c", "C")
+	check(cfg, t, ck, "e", "E")
+	check(cfg, t, ck, "1", "1")
 
 	cfg.end()
 }
@@ -481,10 +498,10 @@ func TestSnapshotSize3B(t *testing.T) {
 	cfg.begin("Test: snapshot size is reasonable")
 
 	for i := 0; i < 200; i++ {
-		ck.Put("x", "0")
-		check(t, ck, "x", "0")
-		ck.Put("x", "1")
-		check(t, ck, "x", "1")
+		Put(cfg, ck, "x", "0")
+		check(cfg, t, ck, "x", "0")
+		Put(cfg, ck, "x", "1")
+		check(cfg, t, ck, "x", "1")
 	}
 
 	// check that servers have thrown away most of their log entries
