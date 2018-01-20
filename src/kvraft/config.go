@@ -36,7 +36,6 @@ func random_handles(kvh []*labrpc.ClientEnd) []*labrpc.ClientEnd {
 type config struct {
 	mu           sync.Mutex
 	t            *testing.T
-	tag          string
 	net          *labrpc.Network
 	n            int
 	kvservers    []*KVServer
@@ -341,7 +340,7 @@ func (cfg *config) make_partition() ([]int, []int) {
 
 var ncpu_once sync.Once
 
-func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate int) *config {
+func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config {
 	ncpu_once.Do(func() {
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
@@ -350,7 +349,6 @@ func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate 
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
-	cfg.tag = tag
 	cfg.net = labrpc.MakeNetwork()
 	cfg.n = n
 	cfg.kvservers = make([]*KVServer, cfg.n)
