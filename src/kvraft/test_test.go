@@ -1,16 +1,21 @@
 package raftkv
 
+import "linearizability"
+
 import "testing"
 import "strconv"
 import "time"
 import "math/rand"
 import "log"
 import "strings"
+import "sync"
 import "sync/atomic"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const electionTimeout = 1 * time.Second
+
+const linearizabilityCheckTimeout = 1 * time.Second
 
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string) string {
@@ -275,6 +280,149 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	cfg.end()
 }
 
+// similar to GenericTest, but with clients doing random operations (and using a
+// linearizability checker)
+func GenericTestLinearizability(t *testing.T, part string, nclients int, nservers int, unreliable bool, crash bool, partitions bool, maxraftstate int) {
+
+	title := "Test: "
+	if unreliable {
+		// the network drops RPC requests and replies.
+		title = title + "unreliable net, "
+	}
+	if crash {
+		// peers re-start, and thus persistence must work.
+		title = title + "restarts, "
+	}
+	if partitions {
+		// the network may partition
+		title = title + "partitions, "
+	}
+	if maxraftstate != -1 {
+		title = title + "snapshots, "
+	}
+	if nclients > 1 {
+		title = title + "many clients"
+	} else {
+		title = title + "one client"
+	}
+	title = title + ", linearizability checks (" + part + ")" // 3A or 3B
+
+	cfg := make_config(t, nservers, unreliable, maxraftstate)
+	defer cfg.cleanup()
+
+	cfg.begin(title)
+
+	begin := time.Now()
+	var operations []linearizability.Operation
+	var opMu sync.Mutex
+
+	done_partitioner := int32(0)
+	done_clients := int32(0)
+	ch_partitioner := make(chan bool)
+	clnts := make([]chan int, nclients)
+	for i := 0; i < nclients; i++ {
+		clnts[i] = make(chan int)
+	}
+	for i := 0; i < 3; i++ {
+		// log.Printf("Iteration %v\n", i)
+		atomic.StoreInt32(&done_clients, 0)
+		atomic.StoreInt32(&done_partitioner, 0)
+		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
+			j := 0
+			defer func() {
+				clnts[cli] <- j
+			}()
+			for atomic.LoadInt32(&done_clients) == 0 {
+				key := strconv.Itoa(rand.Int() % nclients)
+				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
+				var inp linearizability.KvInput
+				var out linearizability.KvOutput
+				start := int64(time.Since(begin))
+				if (rand.Int() % 1000) < 500 {
+					Append(cfg, myck, key, nv)
+					inp = linearizability.KvInput{Op: 2, Key: key, Value: nv}
+					j++
+				} else if (rand.Int() % 1000) < 100 {
+					Put(cfg, myck, key, nv)
+					inp = linearizability.KvInput{Op: 1, Key: key, Value: nv}
+					j++
+				} else {
+					v := Get(cfg, myck, key)
+					inp = linearizability.KvInput{Op: 0, Key: key}
+					out = linearizability.KvOutput{Value: v}
+				}
+				end := int64(time.Since(begin))
+				op := linearizability.Operation{Input: inp, Call: start, Output: out, Return: end}
+				opMu.Lock()
+				operations = append(operations, op)
+				opMu.Unlock()
+			}
+		})
+
+		if partitions {
+			// Allow the clients to perform some operations without interruption
+			time.Sleep(1 * time.Second)
+			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
+		}
+		time.Sleep(5 * time.Second)
+
+		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
+		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
+
+		if partitions {
+			// log.Printf("wait for partitioner\n")
+			<-ch_partitioner
+			// reconnect network and submit a request. A client may
+			// have submitted a request in a minority.  That request
+			// won't return until that server discovers a new term
+			// has started.
+			cfg.ConnectAll()
+			// wait for a while so that we have a new term
+			time.Sleep(electionTimeout)
+		}
+
+		if crash {
+			// log.Printf("shutdown servers\n")
+			for i := 0; i < nservers; i++ {
+				cfg.ShutdownServer(i)
+			}
+			// Wait for a while for servers to shutdown, since
+			// shutdown isn't a real crash and isn't instantaneous
+			time.Sleep(electionTimeout)
+			// log.Printf("restart servers\n")
+			// crash and re-start all
+			for i := 0; i < nservers; i++ {
+				cfg.StartServer(i)
+			}
+			cfg.ConnectAll()
+		}
+
+		// wait for clients.
+		for i := 0; i < nclients; i++ {
+			<-clnts[i]
+		}
+
+		if maxraftstate > 0 {
+			// Check maximum after the servers have processed all client
+			// requests and had time to checkpoint.
+			if cfg.LogSize() > 2*maxraftstate {
+				t.Fatalf("logs were not trimmed (%v > 2*%v)", cfg.LogSize(), maxraftstate)
+			}
+		}
+	}
+
+	cfg.end()
+
+	// log.Printf("Checking linearizability of %d operations", len(operations))
+	// start := time.Now()
+	ok := linearizability.CheckOperationsTimeout(linearizability.KvModel(), operations, linearizabilityCheckTimeout)
+	// dur := time.Since(start)
+	// log.Printf("Linearizability check done in %s; result: %t", time.Since(start).String(), ok)
+	if !ok {
+		t.Fatal("history is not linearizable")
+	}
+}
+
 func TestBasic3A(t *testing.T) {
 	// Test: one client (3A) ...
 	GenericTest(t, "3A", 1, false, false, false, -1)
@@ -435,6 +583,11 @@ func TestPersistPartitionUnreliable3A(t *testing.T) {
 	GenericTest(t, "3A", 5, true, true, true, -1)
 }
 
+func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
+	// Test: unreliable net, restarts, partitions, linearizability checks (3A) ...
+	GenericTestLinearizability(t, "3A", 15, 7, true, true, true, -1)
+}
+
 //
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
@@ -551,4 +704,9 @@ func TestSnapshotUnreliableRecover3B(t *testing.T) {
 func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 1000)
+}
+
+func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T) {
+	// Test: unreliable net, restarts, partitions, snapshots, linearizability checks (3B) ...
+	GenericTestLinearizability(t, "3B", 15, 7, true, true, true, 1000)
 }
