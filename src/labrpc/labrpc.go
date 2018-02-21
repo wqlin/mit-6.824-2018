@@ -35,8 +35,7 @@ package labrpc
 // Concurrent calls to Call() may be delivered to the server out of order,
 // since the network may re-order messages.
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return. That is, there
-// is no need to implement your own timeouts around Call().
+// handler function on the server side does not return.
 // the server RPC handler function must declare its args and reply arguments
 // as pointers, so that their types exactly match the types of the arguments
 // to Call().

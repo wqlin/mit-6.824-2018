@@ -479,10 +479,12 @@ func (cfg *config) end() {
 	atomic.AddInt32(&cfg.testNum, 1) // suppress two-minute timeout
 
 	if cfg.t.Failed() == false {
+		cfg.mu.Lock()
 		t := time.Since(cfg.t0).Seconds()     // real time
 		npeers := cfg.n                       // number of Raft peers
 		nrpc := cfg.rpcTotal() - cfg.rpcs0    // number of RPC sends
 		ncmds := cfg.maxIndex - cfg.maxIndex0 // number of Raft agreements reported
+		cfg.mu.Unlock()
 
 		fmt.Printf("  ... Passed --")
 		fmt.Printf("  %4.1f  %d %4d %4d\n", t, npeers, nrpc, ncmds)
