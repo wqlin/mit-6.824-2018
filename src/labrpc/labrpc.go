@@ -225,6 +225,11 @@ func (rn *Network) ProcessReq(req reqMsg) {
 				replyOK = true
 			case <-time.After(100 * time.Millisecond):
 				serverDead = rn.IsServerDead(req.endname, servername, server)
+				if serverDead {
+					go func() {
+						<-ech // drain channel to let the goroutine created earlier terminate
+					}()
+				}
 			}
 		}
 

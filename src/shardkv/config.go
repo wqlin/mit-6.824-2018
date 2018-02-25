@@ -7,6 +7,7 @@ import "os"
 
 // import "log"
 import crand "crypto/rand"
+import "math/big"
 import "math/rand"
 import "encoding/base64"
 import "sync"
@@ -20,6 +21,13 @@ func randstring(n int) string {
 	crand.Read(b)
 	s := base64.URLEncoding.EncodeToString(b)
 	return s[0:n]
+}
+
+func makeSeed() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := crand.Int(crand.Reader, max)
+	x := bigx.Int64()
+	return x
 }
 
 // Randomize server handles
@@ -318,6 +326,7 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
 		}
+		rand.Seed(makeSeed())
 	})
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
