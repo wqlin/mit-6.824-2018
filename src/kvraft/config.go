@@ -52,11 +52,18 @@ type config struct {
 	clerks       map[*Clerk][]string
 	nextClientId int
 	maxraftstate int
-	testNum      int32 // for two-minute timeout
+	start        time.Time // time at which make_config() was called
 	// begin()/end() statistics
 	t0    time.Time // time at which test_test.go called cfg.begin()
 	rpcs0 int       // rpcTotal() at start of test
 	ops   int32     // number of clerk get/put/append method calls
+}
+
+func (cfg *config) checkTimeout() {
+	// enforce a two minute real-time limit on each test
+	if !cfg.t.Failed() && time.Since(cfg.start) > 120*time.Second {
+		cfg.t.Fatal("test took longer than 120 seconds")
+	}
 }
 
 func (cfg *config) cleanup() {
@@ -67,6 +74,7 @@ func (cfg *config) cleanup() {
 			cfg.kvservers[i].Kill()
 		}
 	}
+	cfg.checkTimeout()
 }
 
 // Maximum log size across all servers
@@ -366,6 +374,7 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg.clerks = make(map[*Clerk][]string)
 	cfg.nextClientId = cfg.n + 1000 // client ids start 1000 above the highest serverid
 	cfg.maxraftstate = maxraftstate
+	cfg.start = time.Now()
 
 	// create a full set of KV servers.
 	for i := 0; i < cfg.n; i++ {
@@ -391,15 +400,6 @@ func (cfg *config) begin(description string) {
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.rpcTotal()
 	atomic.StoreInt32(&cfg.ops, 0)
-
-	// enforce a two minute real-time limit on each test.
-	num := atomic.AddInt32(&cfg.testNum, 1)
-	go func() {
-		time.Sleep(time.Second * 120)
-		if num == atomic.LoadInt32(&cfg.testNum) {
-			cfg.t.Fatalf("test took longer than 120 seconds")
-		}
-	}()
 }
 
 func (cfg *config) op() {
@@ -411,8 +411,7 @@ func (cfg *config) op() {
 // print the Passed message,
 // and some performance numbers.
 func (cfg *config) end() {
-	atomic.AddInt32(&cfg.testNum, 1) // suppress two-minute timeout
-
+	cfg.checkTimeout()
 	if cfg.t.Failed() == false {
 		t := time.Since(cfg.t0).Seconds()  // real time
 		npeers := cfg.n                    // number of Raft peers
