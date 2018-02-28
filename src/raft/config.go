@@ -227,6 +227,7 @@ func (cfg *config) cleanup() {
 			cfg.rafts[i].Kill()
 		}
 	}
+	cfg.net.Cleanup()
 	cfg.checkTimeout()
 }
 

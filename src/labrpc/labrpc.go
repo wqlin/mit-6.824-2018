@@ -73,8 +73,9 @@ type replyMsg struct {
 }
 
 type ClientEnd struct {
-	endname interface{} // this end-point's name
-	ch      chan reqMsg // copy of Network.endCh
+	endname interface{}   // this end-point's name
+	ch      chan reqMsg   // copy of Network.endCh
+	done    chan struct{} // closed when Network is cleaned up
 }
 
 // send an RPC, wait for the reply.
@@ -92,7 +93,12 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	qe.Encode(args)
 	req.args = qb.Bytes()
 
-	e.ch <- req
+	select {
+	case e.ch <- req:
+		// ok
+	case <-e.done:
+		return false
+	}
 
 	rep := <-req.replyCh
 	if rep.ok {
@@ -117,7 +123,8 @@ type Network struct {
 	servers        map[interface{}]*Server     // servers, by name
 	connections    map[interface{}]interface{} // endname -> servername
 	endCh          chan reqMsg
-	count          int32 // total RPC count, for statistics
+	done           chan struct{} // closed when Network is cleaned up
+	count          int32         // total RPC count, for statistics
 }
 
 func MakeNetwork() *Network {
@@ -128,16 +135,26 @@ func MakeNetwork() *Network {
 	rn.servers = map[interface{}]*Server{}
 	rn.connections = map[interface{}](interface{}){}
 	rn.endCh = make(chan reqMsg)
+	rn.done = make(chan struct{})
 
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
-		for xreq := range rn.endCh {
-			atomic.AddInt32(&rn.count, 1)
-			go rn.ProcessReq(xreq)
+		for {
+			select {
+			case xreq := <-rn.endCh:
+				atomic.AddInt32(&rn.count, 1)
+				go rn.ProcessReq(xreq)
+			case <-rn.done:
+				return
+			}
 		}
 	}()
 
 	return rn
+}
+
+func (rn *Network) Cleanup() {
+	close(rn.done)
 }
 
 func (rn *Network) Reliable(yes bool) {
@@ -291,6 +308,7 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	e := &ClientEnd{}
 	e.endname = endname
 	e.ch = rn.endCh
+	e.done = rn.done
 	rn.ends[endname] = e
 	rn.enabled[endname] = false
 	rn.connections[endname] = nil

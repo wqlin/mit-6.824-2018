@@ -74,6 +74,7 @@ func (cfg *config) cleanup() {
 			cfg.kvservers[i].Kill()
 		}
 	}
+	cfg.net.Cleanup()
 	cfg.checkTimeout()
 }
 

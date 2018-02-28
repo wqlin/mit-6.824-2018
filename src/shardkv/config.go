@@ -80,6 +80,7 @@ func (cfg *config) cleanup() {
 	for gi := 0; gi < cfg.ngroups; gi++ {
 		cfg.ShutdownGroup(gi)
 	}
+	cfg.net.Cleanup()
 	cfg.checkTimeout()
 }
 
