@@ -28,7 +28,57 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// All ntasks tasks have to be scheduled on workers. Once all tasks
 	// have completed successfully, schedule() should return.
 	//
-	// Your code here (Part III, Part IV).
-	//
+
+	constructTaskArgs := func(phase jobPhase, task int) DoTaskArgs {
+		debug("task: %d\n", task)
+		var taskArgs DoTaskArgs
+		taskArgs.Phase = phase
+		taskArgs.JobName = jobName
+		taskArgs.NumOtherPhase = n_other
+		taskArgs.TaskNumber = task
+		if phase == mapPhase {
+			taskArgs.File = mapFiles[task]
+		}
+		return taskArgs
+	}
+
+	/**
+	We don't need to use `sync.WaitGroup`.
+	Instead, worker sends back a response when it successfully execute a task.
+	The master keep polling the number of finished tasks.
+	When all tasks have finished, master can break the loop and finish schedule
+	 */
+	tasks := make(chan int) // act as task queue
+	go func() {
+		for i := 0; i < ntasks; i++ {
+			tasks <- i
+		}
+	}()
+	successTasks := 0
+	success := make(chan int)
+
+loop:
+	for {
+		select {
+		case task := <-tasks:
+			go func() {
+				worker := <-registerChan
+				status := call(worker, "Worker.DoTask", constructTaskArgs(phase, task), nil)
+				if status {
+					success <- 1
+					go func() { registerChan <- worker }()
+				} else {
+					tasks <- task
+				}
+			}()
+		case <-success:
+			successTasks += 1
+		default:
+			if successTasks == ntasks {
+				break loop
+			}
+		}
+	}
+
 	fmt.Printf("Schedule: %v done\n", phase)
 }
