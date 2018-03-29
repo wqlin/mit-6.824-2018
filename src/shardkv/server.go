@@ -54,9 +54,9 @@ func (kv *ShardKV) Kill() {
 //
 // me is the index of the current server in servers[].
 //
-// the k/v server should store snapshots with
-// persister.SaveSnapshot(), and Raft should save its state (including
-// log) with persister.SaveRaftState().
+// the k/v server should store snapshots through the underlying Raft
+// implementation, which should call persister.SaveStateAndSnapshot() to
+// atomically save the Raft state along with the snapshot.
 //
 // the k/v server should snapshot when Raft's saved state exceeds
 // maxraftstate bytes, in order to allow Raft to garbage-collect its
