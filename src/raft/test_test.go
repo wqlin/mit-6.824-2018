@@ -41,6 +41,9 @@ func TestInitialElection2A(t *testing.T) {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
 
+	// there should still be a leader.
+	cfg.checkOneLeader()
+
 	cfg.end()
 }
 

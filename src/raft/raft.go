@@ -160,7 +160,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.votedFor = args.CandidateId
 	rf.setOrResetTimer(newRandDuration(HeartBeatTimeout)) // granting vote to candidate, reset timer
 	rf.persist()
-	DPrintf("VOTE: Follower %d vote for candidate: %d, vote args: %v, follower term: %d, last log index: %d, last log term: %d", rf.me, args.CandidateId, args,rf.currentTerm, lastLogIndex, rf.log[lastLogIndex].LogTerm)
+	DPrintf("VOTE: Follower %d vote for candidate: %d, vote args: %v, follower term: %d, last log index: %d, last log term: %d", rf.me, args.CandidateId, args, rf.currentTerm, lastLogIndex, rf.log[lastLogIndex].LogTerm)
 }
 
 // send RequestVote RPC call to server and handle reply
@@ -406,7 +406,8 @@ func (rf *Raft) replicateLog() {
 // server isn't the leader, returns false. otherwise start the
 // agreement and return immediately. there is no guarantee that this
 // command will ever be committed to the Raft log, since the leader
-// may fail or lose an election.
+// may fail or lose an election. even if the Raft instance has been killed,
+// this function should return gracefully.
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
@@ -417,7 +418,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Lock()
 	defer rf.Unlock()
 
-	if rf.state == Leader { // append log only if server is leader
+	if rf.status == Live && rf.state == Leader { // append log only if server is leader
 		index := rf.logIndex
 		entry := LogEntry{LogIndex: index, LogTerm: rf.currentTerm, Command: command}
 		// DPrintf("Leader %d start new log entry: %v", rf.me, entry)
