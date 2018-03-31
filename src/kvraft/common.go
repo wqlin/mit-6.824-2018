@@ -1,34 +1,32 @@
 package raftkv
 
 const (
-	OK       = "OK"
-	ErrNoKey = "ErrNoKey"
+	OK          = "OK"
+	ErrNoKey    = "ErrNoKey"
+	WrongLeader = "WrongLeader"
 )
 
 type Err string
 
-// Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	RequestId       int64 // use current nanosecond time to uniquely identify each operation
+	ExpireRequestId int64
+	Key             string
+	Value           string
+	Op              string // "Put" or "Append"
 }
 
 type PutAppendReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	RequestId       int64 // use current nanosecond time to uniquely identify each operation
+	ExpireRequestId int64
+	Key             string
 }
 
 type GetReply struct {
-	WrongLeader bool
-	Err         Err
-	Value       string
+	Err   Err
+	Value string
 }

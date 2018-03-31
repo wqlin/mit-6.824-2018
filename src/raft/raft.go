@@ -12,9 +12,9 @@ import (
 	"math/big"
 )
 
-const AppendEntriesInterval = time.Millisecond * time.Duration(150) // sleep time between successive AppendEntries call
-const ElectionTimeout = time.Millisecond * time.Duration(1000)
-const HeartBeatTimeout = time.Millisecond * time.Duration(1000)
+const AppendEntriesInterval = time.Millisecond * time.Duration(80) // sleep time between successive AppendEntries call
+const ElectionTimeout = time.Millisecond * time.Duration(800)
+const HeartBeatTimeout = time.Millisecond * time.Duration(800)
 
 // seed random number generator
 func init() {
@@ -87,9 +87,10 @@ func (rf *Raft) persist() {
 
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
+	e.Encode(rf.logIndex)
 	e.Encode(rf.commitIndex)
 	e.Encode(rf.lastApplied)
-	e.Encode(rf.log[1:])
+	e.Encode(rf.log)
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -102,24 +103,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm, votedFor, commitIndex, lastApplied int
-	var logs []LogEntry
+
+	currentTerm, votedFor, logIndex, commitIndex, lastApplied := 0, 0, 0, 0, 0
 
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
+		d.Decode(&logIndex) != nil ||
 		d.Decode(&commitIndex) != nil ||
 		d.Decode(&lastApplied) != nil ||
-		d.Decode(&logs) != nil {
+		d.Decode(&rf.log) != nil {
 		log.Fatal("Error")
-	} else {
-		rf.Lock()
-		defer rf.Unlock()
-		rf.currentTerm, rf.votedFor, rf.commitIndex, rf.lastApplied = currentTerm, votedFor, commitIndex, lastApplied
-		for i := 0; i < len(logs); i++ {
-			rf.log = append(rf.log, logs[i])
-			rf.logIndex += 1
-		}
 	}
+	rf.currentTerm, rf.votedFor, rf.logIndex, rf.commitIndex, rf.lastApplied = currentTerm, votedFor, logIndex, commitIndex, lastApplied
 }
 
 // RequestVote RPC handler.
@@ -139,7 +134,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm, rf.votedFor = args.Term, -1
 		rf.persist()
 		if rf.state != Follower { // once server becomes follower, it has to reset timer
-			//DPrintf("VOTE: Server %d receiving request vote from %d transition to follower, origin state: %s", rf.me, args.CandidateId, rf.state)
 			rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 			rf.state = Follower
 		}
@@ -147,13 +141,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.leaderId = -1 // other server trying to elect a new leader
 	reply.Term = args.Term
 	lastLogIndex := rf.logIndex - 1
-	if lastLogIndex == 0 && (rf.lastApplied != 0 || rf.commitIndex != 0) {
-		//DPrintf("ERROR: Server %d lastLogIndex is %d, rf.lastApplied: %d, rf.term: %d, rf.commitIndex: %d, entries: %v", rf.me, rf.logIndex, rf.lastApplied, rf.currentTerm, rf.log)
-	}
 	if rf.log[lastLogIndex].LogTerm > args.LastLogTerm || // the server has log with higher term
 		(rf.log[lastLogIndex].LogTerm == args.LastLogTerm && lastLogIndex > args.LastLogIndex) { // under same term, this server has longer index
 		reply.VoteGranted = false
-		//DPrintf("VOTE: Server %d reject candidate %d vote, vote args: %v, server state: %s, last log index: %d, last log term: %d", rf.me, args.CandidateId, args, rf.state, lastLogIndex, rf.log[lastLogIndex].LogTerm)
 		return
 	}
 	reply.VoteGranted = true
@@ -208,7 +198,7 @@ func (rf *Raft) startElection() {
 
 	electionDuration := newRandDuration(ElectionTimeout)
 	electionTimer := time.NewTimer(electionDuration) // in case there's no quorum, this election should timeout
-	//DPrintf("CANDIDATE: Candidate %d time out, start election and ask for vote, args: %d, rf.logIndex: %d, next timeout time: %s", me, args, lastLogIndex+1, electionDuration.String())
+	DPrintf("CANDIDATE: Candidate %d time out, start election and ask for vote, args: %d, rf.logIndex: %d, next timeout time: %s", me, args, lastLogIndex+1, electionDuration.String())
 
 	voteCount, threshold := 0, serverCount/2 // counting vote
 
@@ -226,7 +216,7 @@ func (rf *Raft) startElection() {
 					rf.state = Leader
 					rf.initIndex() // after election, reinitialized nextIndex and matchIndex
 					go rf.replicateLog()
-				} // if server is not in candidate state, then another server establishes itself as leader
+				} // if server is not in candidate state, then another server may establishes itself as leader
 				rf.Unlock()
 				return
 			}
@@ -275,7 +265,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for ; conflictIndex > rf.commitIndex && rf.log[conflictIndex-1].LogTerm == conflictTerm; conflictIndex-- {
 		}
 
-		reply.Success, reply.ConflictIndex = false, Max(rf.commitIndex+1, conflictIndex)
+		reply.Success, reply.ConflictIndex = false, Max(rf.commitIndex, conflictIndex)
 		return
 	}
 	reply.Success, reply.ConflictIndex = true, -1
@@ -286,13 +276,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 		if rf.log[prevLogIndex+1+i].LogTerm != args.Entries[i].LogTerm {
+			go rf.notifyLogTruncation(prevLogIndex+1+i, rf.logIndex)
 			rf.logIndex = prevLogIndex + 1 + i
 			rf.log = append(rf.log[:rf.logIndex]) // delete any conflicting log entries
 			break
 		}
-	}
-	if args.Len > 0 && i < args.Len {
-		DPrintf("APPEND: Follower %d receive log from leader: %d, appending following logs: %v", rf.me, args.LeaderId, args.Entries[i:args.Len])
 	}
 	for ; i < args.Len; i++ {
 		rf.log = append(rf.log, args.Entries[i])
@@ -317,7 +305,7 @@ func (rf *Raft) makeAppendEntriesCall(follower int, retryCh chan<- int, empty bo
 	if empty || rf.nextIndex[follower] == rf.logIndex {
 		args = AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, CommitIndex: rf.commitIndex, Len: 0, Entries: nil}
 	} else {
-		logs := rf.log[prevLogIndex+1:]
+		logs := append([]LogEntry{}, rf.log[prevLogIndex+1:]...)
 		args = AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, CommitIndex: rf.commitIndex, Len: len(logs), Entries: logs}
 	}
 	rf.Unlock()
@@ -326,7 +314,6 @@ func (rf *Raft) makeAppendEntriesCall(follower int, retryCh chan<- int, empty bo
 		rf.Lock()
 		if !reply.Success {
 			if reply.Term > rf.currentTerm { // the leader is obsolete
-				DPrintf("When appending entries, server %d find itself is obsolete, transition to follower, old term: %d, new term: %d", rf.me, rf.currentTerm, reply.Term)
 				rf.currentTerm, rf.state, rf.votedFor, rf.leaderId = reply.Term, Follower, -1, -1
 				rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 				rf.persist()
@@ -338,9 +325,6 @@ func (rf *Raft) makeAppendEntriesCall(follower int, retryCh chan<- int, empty bo
 			if prevLogIndex+logEntriesLen >= rf.nextIndex[follower] { // in case apply arrive in out of order
 				rf.nextIndex[follower] = prevLogIndex + logEntriesLen + 1
 				rf.matchIndex[follower] = prevLogIndex + logEntriesLen
-				if logEntriesLen > 0 {
-					DPrintf("Leader %d update follower %d next index: %d, match index: %d", rf.me, follower, rf.nextIndex[follower], rf.matchIndex[follower])
-				}
 			}
 			// if log entry contains term equals to current term, then try if we can commit log by counting replicas
 			if prevLogIndex+logEntriesLen < rf.logIndex && rf.commitIndex < prevLogIndex+logEntriesLen && rf.log[prevLogIndex+logEntriesLen].LogTerm == rf.currentTerm {
@@ -382,6 +366,7 @@ func (rf *Raft) retryAppendEntries(retryCh chan int, done <-chan struct{}) {
 func (rf *Raft) replicateLog() {
 	retryCh := make(chan int)
 	done := make(chan struct{})
+	rf.Start("") // start empty log entry to help commit
 	go rf.retryAppendEntries(retryCh, done)
 	for {
 		rf.Lock()
@@ -421,7 +406,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.status == Live && rf.state == Leader { // append log only if server is leader
 		index := rf.logIndex
 		entry := LogEntry{LogIndex: index, LogTerm: rf.currentTerm, Command: command}
-		// DPrintf("Leader %d start new log entry: %v", rf.me, entry)
+
 		if rf.logIndex < len(rf.log) {
 			rf.log[rf.logIndex] = entry
 		} else {
@@ -438,8 +423,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) Kill() {
 	rf.Lock()
-	rf.status = Dead
 	rf.persist()
+	rf.status = Dead
 	DPrintf("Kill raft server: %d, state: %s, lastLogIndex: %d, term: %d, commit index: %d, last applied index: %d", rf.me, rf.state, rf.logIndex, rf.currentTerm, rf.commitIndex, rf.lastApplied)
 	rf.Unlock()
 }
@@ -452,29 +437,54 @@ loop:
 	goto loop
 }
 
+// notify client when raft server truncate log
+func (rf *Raft) notifyLogTruncation(start int, end int) {
+	for i := start; i < end; i++ {
+		rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: i, CommandTerm: -1, Command: "LogTruncation"}
+	}
+
+}
+
 // notify to apply
 func (rf *Raft) notifyApply() {
-	rf.Lock()
-	logIndex, lastApplied, commitIndex := rf.logIndex, rf.lastApplied, rf.commitIndex
-	rf.Unlock()
-	if lastApplied < logIndex && lastApplied < commitIndex {
-		rf.notifyCh <- struct{}{}
-	}
+	rf.notifyCh <- struct{}{}
 }
+
 func (rf *Raft) apply() {
 loop:
 	<-rf.notifyCh
 	rf.Lock()
-	startIndex, endIndex := rf.lastApplied+1, rf.commitIndex
-	entries := append(rf.log[startIndex:endIndex+1])
-	rf.lastApplied = rf.commitIndex
-	rf.persist()
+	var entries []LogEntry
+	if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
+		startIndex, endIndex := rf.lastApplied+1, rf.commitIndex
+		entries = append([]LogEntry{},rf.log[startIndex:endIndex+1]...)
+		rf.lastApplied = rf.commitIndex
+		rf.persist()
+	}
 	rf.Unlock()
 
 	for i := 0; i < len(entries); i++ {
-		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+		if cmd, ok := entries[i].Command.(string); ok && cmd == "" {
+			rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+		} else {
+			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+		}
 	}
 	goto loop
+}
+
+func (rf *Raft) Replay(startIndex int) {
+	rf.Lock()
+	entries := append([]LogEntry{}, rf.log[startIndex:rf.lastApplied+1]...)
+	rf.Unlock()
+	for i := 0; i < len(entries); i++ {
+		if cmd, ok := entries[i].Command.(string); ok && cmd == "" {
+			rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+		} else {
+			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+		}
+	}
+	rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: -1, CommandTerm: -1, Command: "ReplayDone"}
 }
 
 //
@@ -488,7 +498,8 @@ loop:
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
+func
+Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister

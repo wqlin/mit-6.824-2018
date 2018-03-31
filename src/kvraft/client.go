@@ -2,12 +2,15 @@ package raftkv
 
 import "labrpc"
 import "crypto/rand"
-import "math/big"
-
+import (
+	"math/big"
+	"time"
+)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers       []*labrpc.ClientEnd
+	lastRequestId int64
+	leaderId      int
 }
 
 func nrand() int64 {
@@ -17,43 +20,59 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool {
+	return ck.servers[ck.leaderId].Call(rpcname, args, reply)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.lastRequestId = 0
+	ck.leaderId = 0
 	return ck
 }
 
-//
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	requestId := time.Now().UnixNano()
+	args := GetArgs{requestId, ck.lastRequestId, key}
+	ck.lastRequestId = requestId
+loop:
+	var reply GetReply
+	if ck.Call("KVServer.Get", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			break
+		case ErrNoKey:
+			break
+		}
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // retry with different server
+		goto loop
+	}
+	return reply.Value
 }
 
-//
-// shared by Put and Append.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	requestId := time.Now().UnixNano()
+	args := PutAppendArgs{requestId, ck.lastRequestId, key, value, op}
+	ck.lastRequestId = requestId
+loop:
+	var reply PutAppendReply
+	if ck.Call("KVServer.PutAppend", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			break
+		}
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // retry with different server
+		goto loop
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
