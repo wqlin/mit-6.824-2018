@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"bytes"
 )
 
 const Debug = 1
@@ -39,8 +40,9 @@ type notifyArgs struct {
 
 type KVServer struct {
 	sync.Mutex
-	me           int
-	maxraftstate int // snapshot if log grows this big
+	me               int
+	lastCommandIndex int // last command index kv server receive from raft
+	maxraftstate     int // snapshot if log grows this big
 
 	rf        *raft.Raft
 	persister *raft.Persister // Object to hold this peer's persisted state
@@ -57,6 +59,35 @@ func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 		ch <- reply
 		delete(kv.notifyChanMap, index)
 	}
+}
+
+func (kv *KVServer) snapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.lastCommandIndex)
+	e.Encode(kv.cache)
+	e.Encode(kv.data)
+
+	snapshot := w.Bytes()
+	kv.rf.PersistAndSaveSnapshot(kv.lastCommandIndex, snapshot)
+}
+
+func (kv *KVServer) readSnapshot() {
+	snapshot := kv.persister.ReadSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	lastCommandIndex := 0
+
+	if d.Decode(&lastCommandIndex) != nil ||
+		d.Decode(&kv.cache) != nil ||
+		d.Decode(&kv.data) != nil {
+		log.Fatal("Error in reading snapshot")
+	}
+	kv.lastCommandIndex = lastCommandIndex
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -107,10 +138,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) Kill() {
+	kv.Lock()
+	kv.snapshot()
 	kv.rf.Kill()
+	kv.Unlock()
+}
+
+func (kv *KVServer) installSnapshot(lastCommandIndex int) {
+	kv.readSnapshot()
+	kv.lastCommandIndex = lastCommandIndex
 }
 
 func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
+	kv.lastCommandIndex = raft.Max(kv.lastCommandIndex, msg.CommandIndex)
 	cmd := msg.Command.(Op)
 	delete(kv.cache, cmd.ExpireRequestId) // delete older request
 	result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
@@ -136,6 +176,9 @@ func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
 		}
 	}
 	kv.notifyIfPresent(msg.CommandIndex, result)
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+		kv.snapshot()
+	}
 }
 
 func (kv *KVServer) run() {
@@ -146,9 +189,21 @@ func (kv *KVServer) run() {
 			if msg.CommandValid {
 				kv.handleValidCommand(msg)
 			} else { // command not valid
-				if cmd, ok := msg.Command.(string); ok && (cmd == "" || cmd == "LogTruncation") {
-					reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
-					kv.notifyIfPresent(msg.CommandIndex, reply)
+				if cmd, ok := msg.Command.(string); ok {
+					if cmd == "LogTruncation" || cmd == "" {
+						reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
+						kv.notifyIfPresent(msg.CommandIndex, reply)
+					} else {
+						kv.installSnapshot(msg.CommandIndex)
+
+						reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
+						for index, ch := range kv.notifyChanMap {
+							if index <= msg.CommandIndex {
+								ch <- reply
+								delete(kv.notifyChanMap, index)
+							}
+						}
+					}
 				}
 			}
 			kv.Unlock()
@@ -166,8 +221,12 @@ loop:
 			if msg.CommandValid {
 				kv.handleValidCommand(msg)
 			} else { // command not valid
-				if cmd, ok := msg.Command.(string); ok && cmd == "ReplayDone" {
-					break loop
+				if cmd, ok := msg.Command.(string); ok {
+					if cmd == "InstallSnapshot" {
+						kv.installSnapshot(msg.CommandIndex)
+					} else if cmd == "ReplayDone" {
+						break loop
+					}
 				}
 			}
 		}
@@ -197,6 +256,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
+	kv.lastCommandIndex = 0
 	kv.maxraftstate = maxraftstate
 	kv.persister = persister
 

@@ -65,3 +65,15 @@ type AppendEntriesReply struct {
 	Term    int
 	ConflictIndex int // in case of conflicting, follower include the first index it store for conflict term
 }
+
+type InstallSnapshotArgs struct {
+	Term int
+	LeaderId int
+	LastIncludedIndex int
+	LastIncludedTerm int
+	Data []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
