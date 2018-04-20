@@ -293,7 +293,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success, reply.ConflictIndex = false, rf.lastIncludedIndex+1
 		return
 	}
-	// DPrintf("Raft server %d receive append entries, args.PrevLogIndex: %d, rf.logIndex: %d, rf.lastIncludedIndex: %d, entries: %#v", rf.me, args.PrevLogIndex, rf.logIndex, rf.lastIncludedIndex,args.Entries)
 	if logIndex <= prevLogIndex || rf.getEntry(prevLogIndex).LogTerm != args.PrevLogTerm { // follower don't agree with leader on last log entry
 		conflictIndex := Min(rf.logIndex-1, prevLogIndex)
 		conflictTerm := rf.getEntry(conflictIndex).LogTerm
@@ -343,7 +342,6 @@ func (rf *Raft) makeAppendEntriesCall(follower int, retryCh chan<- int, empty bo
 		return
 	}
 	var args AppendEntriesArgs
-	// DPrintf("Raft server %d send append entries to follower: %d, nextIndex: %d, actual offset index: %d, rf length of log: %d", rf.me, follower, rf.nextIndex[follower], rf.getOffsetIndex(prevLogIndex), len(rf.log))
 	prevLogTerm := rf.getEntry(prevLogIndex).LogTerm
 	if empty || rf.nextIndex[follower] == rf.logIndex {
 		args = AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, CommitIndex: rf.commitIndex, Len: 0, Entries: nil}
@@ -382,7 +380,7 @@ func (rf *Raft) makeAppendEntriesCall(follower int, retryCh chan<- int, empty bo
 					rf.commitIndex = prevLogIndex + logEntriesLen // can commit log
 					rf.persist()
 					go rf.notifyApply()
-					DPrintf("Leader %d have following servers: %v replicating log and can update commit index to :%d", rf.me, agreedFollower, rf.commitIndex)
+					// DPrintf("Leader %d have following servers: %v replicating log and can update commit index to :%d", rf.me, agreedFollower, rf.commitIndex)
 				}
 			}
 		}
@@ -438,8 +436,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.leaderId = args.LeaderId
 
 	if args.LastIncludedIndex > rf.lastIncludedIndex {
-		DPrintf("Follower %d receive install snapshot request, rf.lastIncludedIndex: %d, args.LastIncludedIndex: %d",
-			rf.me, rf.lastIncludedIndex, args.LastIncludedIndex)
 		truncationStartIndex := rf.getOffsetIndex(args.LastIncludedIndex)
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.commitIndex = Max(rf.commitIndex, rf.lastIncludedIndex)
@@ -451,7 +447,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 		go rf.notifyApply()
-		DPrintf("Follower %d install snapshot successfully, notify kv server", rf.me)
 	}
 }
 
@@ -462,7 +457,6 @@ func (rf *Raft) makeInstallSnapshotCall(follower int, retryCh chan<- int) {
 		rf.Unlock()
 		return
 	}
-	// DPrintf("Raft server %d send install snapshot to follower %d", rf.me, follower)
 	args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.lastIncludedIndex,
 		LastIncludedTerm: rf.getEntry(rf.lastIncludedIndex).LogTerm, Data: rf.persister.ReadSnapshot()}
 	rf.Unlock()
@@ -474,11 +468,8 @@ func (rf *Raft) makeInstallSnapshotCall(follower int, retryCh chan<- int) {
 			rf.state = Follower
 			rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 		} else {
-			previousNextIndex, previousMatchIndex := rf.nextIndex[follower], rf.matchIndex[follower]
 			rf.nextIndex[follower] = Max(rf.nextIndex[follower], rf.lastIncludedIndex+1)
 			rf.matchIndex[follower] = Max(rf.matchIndex[follower], rf.lastIncludedIndex)
-			DPrintf("Raft server %d install snapshot for follower %d successfully, update next index, previous: %d, now: %d, update match index, previous: %d, now: %d",
-				rf.me, follower, previousNextIndex, rf.nextIndex[follower], previousMatchIndex, rf.matchIndex[follower])
 		}
 		rf.Unlock()
 	} else {
@@ -630,8 +621,6 @@ Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan Apply
 	rf.notifyCh = make(chan struct{})
 
 	rf.readPersistState() // initialize from state persisted before a crash
-	DPrintf("Raft server: %d call readPersistState to restore state, currentTerm: %d, lastLogIndex: %d, commit index: %d, last applied index: %d, lastIncludedIndex: %d",
-		rf.me, rf.currentTerm, rf.logIndex, rf.commitIndex, rf.lastApplied, rf.lastIncludedIndex)
 	rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 
 	go rf.run()

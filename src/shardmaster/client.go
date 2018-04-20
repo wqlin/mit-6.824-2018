@@ -10,8 +10,9 @@ import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// Your data here.
+	servers       []*labrpc.ClientEnd
+	lastRequestId int64
+	leaderId      int
 }
 
 func nrand() int64 {
@@ -21,81 +22,97 @@ func nrand() int64 {
 	return x
 }
 
+// retry until RPC call success
+func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool {
+	return ck.servers[ck.leaderId].Call(rpcname, args, reply)
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// Your code here.
+	ck.lastRequestId = 0
+	ck.leaderId = 0
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
-			}
+	requestId := time.Now().UnixNano()
+	args := QueryArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, Num: num}
+	ck.lastRequestId = requestId
+loop:
+	var reply QueryReply
+	if ck.Call("ShardMaster.Query", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			break
 		}
-		time.Sleep(100 * time.Millisecond)
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		goto loop
 	}
+	return reply.Config
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardMaster.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+	requestId := time.Now().UnixNano()
+	args := JoinArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, Servers: servers}
+	ck.lastRequestId = requestId
+loop:
+	var reply JoinReply
+	if ck.Call("ShardMaster.Join", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		goto loop
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardMaster.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+	requestId := time.Now().UnixNano()
+	args := LeaveArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, GIDs: gids}
+	ck.lastRequestId = requestId
+loop:
+	var reply LeaveReply
+	if ck.Call("ShardMaster.Leave", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		goto loop
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
+	requestId := time.Now().UnixNano()
+	args := MoveArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, Shard: shard, GID: gid}
+	ck.lastRequestId = requestId
 
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardMaster.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+loop:
+	var reply MoveReply
+	if ck.Call("ShardMaster.Move", &args, &reply) {
+		switch reply.Err {
+		case WrongLeader:
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			goto loop
+		case OK:
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+	} else {
+		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+		goto loop
 	}
 }

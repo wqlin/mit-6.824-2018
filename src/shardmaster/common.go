@@ -29,45 +29,72 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK          = "OK"
+	WrongLeader = "WrongLeader"
 )
+
+type RequestType int
+
+const (
+	Join  RequestType = iota
+	Leave
+	Move
+	Query
+)
+
+func (t RequestType) String() string {
+	switch t {
+	case Join:
+		return "Join"
+	case Leave:
+		return "Leave"
+	case Move:
+		return "Move"
+	default:
+		return "Query"
+	}
+}
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	RequestId       int64
+	ExpireRequestId int64
+	Servers         map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	RequestId       int64
+	ExpireRequestId int64
+	GIDs            []int
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	RequestId       int64
+	ExpireRequestId int64
+	Shard           int
+	GID             int
 }
 
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	Err Err
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	RequestId       int64
+	ExpireRequestId int64
+	Num             int // desired config number
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	Err    Err
+	Config Config
 }
