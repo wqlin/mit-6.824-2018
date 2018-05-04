@@ -9,7 +9,7 @@ import (
 	"bytes"
 )
 
-const Debug = 1
+const Debug = 0
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -183,6 +183,7 @@ func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
 }
 
 func (kv *KVServer) run() {
+	go kv.rf.Replay(1)
 	for {
 		select {
 		case msg := <-kv.applyCh:
@@ -197,7 +198,6 @@ func (kv *KVServer) run() {
 					}
 					if cmd == "InstallSnapshot" {
 						kv.installSnapshot(msg.CommandIndex)
-
 						reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
 						for index, ch := range kv.notifyChanMap {
 							if index <= msg.CommandIndex {
@@ -211,30 +211,6 @@ func (kv *KVServer) run() {
 			kv.Unlock()
 		}
 	}
-}
-
-func (kv *KVServer) restoreState() {
-	go kv.rf.Replay(1)
-	kv.Lock()
-loop:
-	for {
-		select {
-		case msg := <-kv.applyCh:
-			if msg.CommandValid {
-				kv.handleValidCommand(msg)
-			} else { // command not valid
-				if cmd, ok := msg.Command.(string); ok {
-					if cmd == "InstallSnapshot" {
-						kv.installSnapshot(msg.CommandIndex)
-					} else if cmd == "ReplayDone" {
-						break loop
-					}
-				}
-			}
-		}
-	}
-	kv.Unlock()
-	go kv.run()
 }
 
 //
@@ -268,6 +244,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.cache = make(map[int64]struct{})
 	kv.notifyChanMap = make(map[int]chan notifyArgs)
-	go kv.restoreState()
+	go kv.run()
 	return kv
 }
