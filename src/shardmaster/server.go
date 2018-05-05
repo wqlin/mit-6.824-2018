@@ -156,15 +156,15 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	}
 }
 
-func (sm *ShardMaster) appendNewConfig(newConfig *Config) {
+func (sm *ShardMaster) appendNewConfig(newConfig Config) {
 	newConfig.Num = sm.nextConfigIndex
-	sm.configs = append(sm.configs, *newConfig)
+	sm.configs = append(sm.configs, newConfig)
 	sm.nextConfigIndex += 1
 }
 
 func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 	if cmd, ok := msg.Command.(Op); ok {
-		reply := notifyArgs{Term: msg.CommandTerm, Args: nil}
+		reply := notifyArgs{Term: msg.CommandTerm, Args: ""}
 		switch cmd.Type {
 		case Join:
 			arg := cmd.Args.(JoinArgs)
@@ -211,7 +211,7 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 				}
 				DPrintf("[Join] ShardMaster %d append new Join config, newGIDS: %v, config: %v", sm.me, newGIDS, newConfig)
 				sm.cache[arg.RequestId] = struct{}{}
-				sm.appendNewConfig(&newConfig)
+				sm.appendNewConfig(newConfig)
 			}
 		case Leave:
 			arg := cmd.Args.(LeaveArgs)
@@ -228,7 +228,7 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 					newConfig.Shards = [NShards]int{}
 				} else {
 					remainingGIDs := make([]int, 0)
-					for gid, _ := range newConfig.Groups {
+					for gid := range newConfig.Groups {
 						remainingGIDs = append(remainingGIDs, gid)
 					}
 					shardsPerGID := NShards / len(newConfig.Groups) // NShards / total number of gid
@@ -249,7 +249,6 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 									continue loop
 								}
 							}
-							//
 							id := remainingGIDs[j]
 							j = (j + 1) % len(remainingGIDs)
 							newConfig.Shards[i] = id
@@ -261,7 +260,7 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 					DPrintf("[Leave] ShardMaster %d append new Leave config, shardsPerGID: %d, remainingGIDS: %v, config: %v", sm.me, shardsPerGID, remainingGIDs, newConfig)
 				}
 				sm.cache[arg.RequestId] = struct{}{}
-				sm.appendNewConfig(&newConfig)
+				sm.appendNewConfig(newConfig)
 			}
 		case Move:
 			arg := cmd.Args.(MoveArgs)
@@ -273,7 +272,7 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 				}
 				DPrintf("[Move] ShardMaster %d append new Move config: %#v", sm.me, newConfig)
 				sm.cache[arg.RequestId] = struct{}{}
-				sm.appendNewConfig(&newConfig)
+				sm.appendNewConfig(newConfig)
 			}
 		case Query:
 			arg := cmd.Args.(QueryArgs)
@@ -284,25 +283,8 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 	}
 }
 
-func (sm *ShardMaster) replay() {
-	go sm.rf.Replay(1)
-	sm.Lock()
-loop:
-	for {
-		select {
-		case msg := <-sm.applyCh:
-			if msg.CommandValid {
-				sm.handleValidCommand(msg)
-			} else if cmd, ok := msg.Command.(string); ok && cmd == "ReplayDone" {
-				break loop
-			}
-		}
-	}
-	sm.Unlock()
-	go sm.run()
-}
-
 func (sm *ShardMaster) run() {
+	go sm.rf.Replay(1)
 	for {
 		select {
 		case msg := <-sm.applyCh:
@@ -357,7 +339,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.cache = make(map[int64]struct{})
 	sm.notifyChanMap = make(map[int]chan notifyArgs)
 
-	go sm.replay()
+	go sm.run()
 
 	return sm
 }

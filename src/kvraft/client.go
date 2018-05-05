@@ -45,8 +45,6 @@ loop:
 			goto loop
 		case OK:
 			break
-		case ErrNoKey:
-			break
 		}
 	} else {
 		ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // retry with different server

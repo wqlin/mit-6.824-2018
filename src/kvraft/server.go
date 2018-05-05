@@ -155,22 +155,13 @@ func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
 		delete(kv.cache, cmd.ExpireRequestId) // delete older request
 		result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
 		if cmd.Op == "Get" {
-			if v, ok := kv.data[cmd.Key]; ok {
-				result.Value = v
-			} else {
-				result.Value = ""
-				result.Err = ErrNoKey
-			}
+			result.Value = kv.data[cmd.Key]
 		} else {
 			if _, ok := kv.cache[cmd.RequestId]; !ok { // prevent duplication
 				if cmd.Op == "Put" {
 					kv.data[cmd.Key] = cmd.Value
 				} else {
-					if v, ok := kv.data[cmd.Key]; ok {
-						kv.data[cmd.Key] = v + cmd.Value
-					} else {
-						kv.data[cmd.Key] = cmd.Value
-					}
+					kv.data[cmd.Key] += cmd.Value
 				}
 				kv.cache[cmd.RequestId] = struct{}{}
 			}
