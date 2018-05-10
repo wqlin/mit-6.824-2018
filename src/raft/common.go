@@ -18,12 +18,6 @@ func (state serverState) String() string{
 	}
 }
 
-type serverStatus int32
-const (
-	Live serverStatus = iota
-	Dead
-)
-
 type ApplyMsg struct {
 	CommandValid bool
 	CommandIndex int

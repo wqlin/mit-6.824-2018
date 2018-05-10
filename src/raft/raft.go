@@ -44,12 +44,13 @@ type Raft struct {
 	lastIncludedIndex int                 // index of the last entry in the log that snapshot replaces, initialized to 0
 	logIndex          int                 // index of next log entry to be stored, initialized to 1
 	state             serverState         // state of server
-	status            serverStatus        // live or dead
+	shutdown          chan struct{}       // shutdown gracefully
 	log               []LogEntry          // log entries
 	nextIndex         []int               // for each server, index of the next log entry to send to that server
 	matchIndex        []int               // for each server, index of highest log entry, used to track committed index
 	applyCh           chan ApplyMsg       // apply to client
-	notifyCh          chan struct{}       // notify to apply
+	notifyApplyCh     chan struct{}       // notify to apply
+	notifyReplicateCh chan struct{}       // notify to start replication when start new entries
 	timer             *time.Timer         // heartbeat timer, kick off new leader election when time out
 }
 
@@ -131,7 +132,7 @@ func (rf *Raft) PersistAndSaveSnapshot(lastIncludedIndex int, snapshot [] byte) 
 	defer rf.Unlock()
 	if lastIncludedIndex > rf.lastIncludedIndex {
 		truncationStartIndex := rf.getOffsetIndex(lastIncludedIndex)
-		rf.log = append(rf.log[truncationStartIndex:]) // log entry previous at lastIncludedIndex at 0 now
+		rf.log = append([]LogEntry{}, rf.log[truncationStartIndex:]...) // log entry previous at lastIncludedIndex at 0 now
 		rf.lastIncludedIndex = lastIncludedIndex
 		data := rf.getPersistState()
 		rf.persister.SaveStateAndSnapshot(data, snapshot)
@@ -200,7 +201,7 @@ func (rf *Raft) makeRequestVoteCall(server int, args *RequestVoteArgs, voteCh ch
 				go func() { voteCh <- false }() // stop election
 			}
 			rf.Unlock()
-		} // else other server is more up-to-date this server
+		}
 	} else {
 		retryCh <- server
 	}
@@ -252,7 +253,7 @@ func (rf *Raft) startElection() {
 			}
 		case follower := <-retryCh:
 			rf.Lock()
-			if rf.status == Live && rf.state == Candidate {
+			if rf.state == Candidate {
 				go rf.makeRequestVoteCall(follower, &args, voteCh, retryCh)
 				rf.Unlock()
 			} else {
@@ -261,10 +262,12 @@ func (rf *Raft) startElection() {
 			}
 		case <-electionTimer.C: // election timeout
 			rf.Lock()
-			if rf.status == Live && rf.state == Candidate {
+			if rf.state == Candidate {
 				go rf.startElection()
 			}
 			rf.Unlock()
+			return
+		case <-rf.shutdown:
 			return
 		}
 	}
@@ -402,26 +405,48 @@ func (rf *Raft) retryAppendEntries(retryCh chan int, done <-chan struct{}) {
 	}
 }
 
+func (rf *Raft) notifyReplicate() {
+	select {
+	case <-rf.shutdown:
+		return
+	default:
+		rf.notifyReplicateCh <- struct{}{}
+	}
+}
+
 // replicate (empty)log to follower
 func (rf *Raft) replicateLog() {
 	retryCh := make(chan int)
 	done := make(chan struct{})
 	rf.Start("") // start empty log entry to help commit
 	go rf.retryAppendEntries(retryCh, done)
+	heartBeatTimer := time.NewTimer(AppendEntriesInterval)
 	for {
-		rf.Lock()
-		if rf.status != Live || rf.state != Leader {
-			rf.Unlock()
+		select {
+		case <-rf.shutdown:
 			done <- struct{}{}
 			return
-		}
-		for follower := 0; follower < len(rf.peers); follower++ {
-			if follower != rf.me {
-				go rf.makeAppendEntriesCall(follower, retryCh, false)
+		case <-heartBeatTimer.C:
+			heartBeatTimer.Reset(AppendEntriesInterval)
+			rf.Lock()
+			if rf.state != Leader {
+				rf.Unlock()
+				done <- struct{}{}
+				return
+			}
+			rf.Unlock()
+			for follower := 0; follower < len(rf.peers); follower++ {
+				if follower != rf.me {
+					go rf.makeAppendEntriesCall(follower, retryCh, false)
+				}
+			}
+		case <-rf.notifyReplicateCh:
+			for follower := 0; follower < len(rf.peers); follower++ {
+				if follower != rf.me {
+					go rf.makeAppendEntriesCall(follower, retryCh, false)
+				}
 			}
 		}
-		rf.Unlock()
-		time.Sleep(AppendEntriesInterval)
 	}
 }
 
@@ -495,7 +520,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Lock()
 	defer rf.Unlock()
 
-	if rf.status == Live && rf.state == Leader { // append log only if server is leader
+	if rf.state == Leader { // append log only if server is leader
 		index := rf.logIndex
 		entry := LogEntry{LogIndex: index, LogTerm: rf.currentTerm, Command: command}
 
@@ -507,6 +532,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = rf.logIndex
 		rf.logIndex += 1
 		rf.persist()
+		go rf.notifyReplicate()
 		return index, rf.currentTerm, true
 	} else {
 		return -1, -1, false
@@ -516,17 +542,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.Lock()
 	rf.persist()
-	rf.status = Dead
+	close(rf.shutdown)
 	DPrintf("Kill raft server: %d, state: %s, lastLogIndex: %d, term: %d, commit index: %d, last applied index: %d", rf.me, rf.state, rf.logIndex, rf.currentTerm, rf.commitIndex, rf.lastApplied)
 	rf.Unlock()
 }
 
 // handle timer timeout
 func (rf *Raft) run() {
-loop:
-	<-rf.timer.C
-	go rf.startElection() // follower timeout, start a new election
-	goto loop
+	for {
+		select {
+		case <-rf.timer.C:
+			go rf.startElection() // follower timeout, start a new election
+		case <-rf.shutdown:
+			return
+		}
+	}
 }
 
 // notify client when raft server truncate log
@@ -538,36 +568,38 @@ func (rf *Raft) notifyLogTruncation(start int, end int) {
 
 // notify to apply
 func (rf *Raft) notifyApply() {
-	rf.notifyCh <- struct{}{}
+	rf.notifyApplyCh <- struct{}{}
 }
 
 func (rf *Raft) apply() {
-loop:
-	<-rf.notifyCh
-	rf.Lock()
-	var commandValid bool
-	var entries []LogEntry
-	if rf.lastApplied < rf.lastIncludedIndex {
-		commandValid = false
-		rf.lastApplied = rf.lastIncludedIndex
-		entries = append(entries, LogEntry{LogIndex: rf.lastIncludedIndex, LogTerm: rf.log[0].LogTerm, Command: "InstallSnapshot"})
-	} else if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
-		commandValid = true
-		startIndex, endIndex := rf.getOffsetIndex(rf.lastApplied+1), rf.getOffsetIndex(rf.commitIndex)
-		entries = append([]LogEntry{},rf.log[startIndex:endIndex+1]...)
-		rf.lastApplied = rf.commitIndex
-		rf.persist()
-	}
-	rf.Unlock()
+	for {
+		select {
+		case <-rf.notifyApplyCh:
+			rf.Lock()
+			var commandValid bool
+			var entries []LogEntry
+			if rf.lastApplied < rf.lastIncludedIndex {
+				commandValid = false
+				rf.lastApplied = rf.lastIncludedIndex
+				entries = append(entries, LogEntry{LogIndex: rf.lastIncludedIndex, LogTerm: rf.log[0].LogTerm, Command: "InstallSnapshot"})
+			} else if rf.lastApplied < rf.logIndex && rf.lastApplied < rf.commitIndex {
+				commandValid = true
+				startIndex, endIndex := rf.getOffsetIndex(rf.lastApplied+1), rf.getOffsetIndex(rf.commitIndex)
+				entries = append([]LogEntry{}, rf.log[startIndex:endIndex+1]...)
+				rf.lastApplied = rf.commitIndex
+				rf.persist()
+			}
+			rf.Unlock()
 
-	for i := 0; i < len(entries); i++ {
-		if cmd, ok := entries[i].Command.(string); ok && cmd == "" {
-			rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
-		} else {
-			rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+			for i := 0; i < len(entries); i++ {
+				if cmd, ok := entries[i].Command.(string); ok && cmd == "" {
+					rf.applyCh <- ApplyMsg{CommandValid: false, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+				} else {
+					rf.applyCh <- ApplyMsg{CommandValid: commandValid, CommandIndex: entries[i].LogIndex, CommandTerm: entries[i].LogTerm, Command: entries[i].Command}
+				}
+			}
 		}
 	}
-	goto loop
 }
 
 func (rf *Raft) Replay(startIndex int) {
@@ -578,7 +610,7 @@ func (rf *Raft) Replay(startIndex int) {
 		startIndex = rf.lastIncludedIndex + 1
 		rf.lastApplied = Max(rf.lastApplied, rf.lastIncludedIndex)
 	}
-	entries := append([]LogEntry{},rf.log[rf.getOffsetIndex(startIndex):rf.getOffsetIndex(rf.lastApplied+1)]...)
+	entries := append([]LogEntry{}, rf.log[rf.getOffsetIndex(startIndex):rf.getOffsetIndex(rf.lastApplied+1)]...)
 	rf.Unlock()
 	for i := 0; i < len(entries); i++ {
 		if cmd, ok := entries[i].Command.(string); ok && cmd == "" {
@@ -615,10 +647,11 @@ Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan Apply
 	rf.lastIncludedIndex = 0
 	rf.logIndex = 1
 	rf.state = Follower // initializing as follower
-	rf.status = Live
+	rf.shutdown = make(chan struct{})
 	rf.log = []LogEntry{{0, 0, nil}} // log entry at index 0 is unused
 	rf.applyCh = applyCh
-	rf.notifyCh = make(chan struct{})
+	rf.notifyApplyCh = make(chan struct{})
+	rf.notifyReplicateCh = make(chan struct{})
 
 	rf.readPersistState() // initialize from state persisted before a crash
 	rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
