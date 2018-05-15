@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
 	"bytes"
+	"time"
 )
 
 const Debug = 0
@@ -46,7 +47,8 @@ type KVServer struct {
 	rf        *raft.Raft
 	persister *raft.Persister // Object to hold this peer's persisted state
 
-	applyCh chan raft.ApplyMsg
+	applyCh  chan raft.ApplyMsg
+	shutdown chan struct{}
 
 	data          map[string]string       // storing Key-Value pair
 	cache         map[int64]struct{}      // cache put/append requests that server have processed, use request id as key
@@ -55,18 +57,46 @@ type KVServer struct {
 
 func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 	if ch, ok := kv.notifyChanMap[index]; ok {
-		ch <- reply
 		delete(kv.notifyChanMap, index)
+		ch <- reply
 	}
 }
 
+func (kv *KVServer) startOp(op Op) (Err, string) {
+	index, term, ok := kv.rf.Start(op)
+	if !ok {
+		return WrongLeader, ""
+	}
+	kv.Lock()
+	notifyCh := make(chan notifyArgs)
+	kv.notifyChanMap[index] = notifyCh
+	kv.Unlock()
+	DPrintf("%d start %d at %d", kv.me, op.RequestId, index)
+	timeoutTimer := time.NewTimer(5 *time.Second)
+	for {
+		select {
+		case <-timeoutTimer.C:
+			kv.Lock()
+			delete(kv.notifyChanMap, index)
+			kv.Unlock()
+			DPrintf("%d delete %d channel at %d", kv.me, op.RequestId, index)
+			return WrongLeader, ""
+		case result := <-notifyCh:
+			DPrintf("%d get %d reply %v at %d", kv.me, op.RequestId, result, index)
+			if result.Term != term {
+				return WrongLeader, ""
+			} else {
+				return result.Err, result.Value
+			}
+		}
+	}
+	return OK, ""
+}
 func (kv *KVServer) snapshot(lastCommandIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-
 	e.Encode(kv.cache)
 	e.Encode(kv.data)
-
 	snapshot := w.Bytes()
 	kv.rf.PersistAndSaveSnapshot(lastCommandIndex, snapshot)
 }
@@ -84,7 +114,6 @@ func (kv *KVServer) readSnapshot() {
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-
 	if d.Decode(&kv.cache) != nil ||
 		d.Decode(&kv.data) != nil {
 		log.Fatal("Error in reading snapshot")
@@ -92,58 +121,20 @@ func (kv *KVServer) readSnapshot() {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.Lock()
 	op := Op{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Key: args.Key, Value: "", Op: "Get"}
-	index, term, ok := kv.rf.Start(op)
-	if !ok {
-		kv.Unlock()
-		reply.Err = WrongLeader
-		return
-	}
-	notifyCh := make(chan notifyArgs)
-	kv.notifyChanMap[index] = notifyCh
-	kv.Unlock()
-	result := <-notifyCh
-	if result.Term != term {
-		reply.Err = WrongLeader
-	} else {
-		reply.Value = result.Value
-		reply.Err = result.Err
-	}
+	err, value := kv.startOp(op)
+	reply.Err, reply.Value = err, value
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.Lock()
-	if _, ok := kv.cache[args.RequestId]; ok { // find duplicate request
-		reply.Err = OK
-		kv.Unlock()
-		return
-	} else {
-		op := Op{RequestId: args.RequestId, Key: args.Key, Value: args.Value, Op: args.Op}
-		index, term, ok := kv.rf.Start(op)
-		if !ok {
-			kv.Unlock()
-			reply.Err = WrongLeader
-			return
-		}
-		notifyCh := make(chan notifyArgs)
-		kv.notifyChanMap[index] = notifyCh
-		kv.Unlock()
-		result := <-notifyCh
-		if result.Term != term {
-			reply.Err = WrongLeader
-		} else {
-			reply.Err = result.Err
-		}
-	}
+	op := Op{RequestId: args.RequestId, Key: args.Key, Value: args.Value, Op: args.Op}
+	err, _ := kv.startOp(op)
+	reply.Err = err
 }
 
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
-}
-
-func (kv *KVServer) installSnapshot() {
-	kv.readSnapshot()
+	close(kv.shutdown)
 }
 
 func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
@@ -152,15 +143,13 @@ func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
 		result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
 		if cmd.Op == "Get" {
 			result.Value = kv.data[cmd.Key]
-		} else {
-			if _, ok := kv.cache[cmd.RequestId]; !ok { // prevent duplication
-				if cmd.Op == "Put" {
-					kv.data[cmd.Key] = cmd.Value
-				} else {
-					kv.data[cmd.Key] += cmd.Value
-				}
-				kv.cache[cmd.RequestId] = struct{}{}
+		} else if _, ok := kv.cache[cmd.RequestId]; !ok { // prevent duplication
+			if cmd.Op == "Put" {
+				kv.data[cmd.Key] = cmd.Value
+			} else {
+				kv.data[cmd.Key] += cmd.Value
 			}
+			kv.cache[cmd.RequestId] = struct{}{}
 		}
 		kv.snapshotIfNeeded(msg.CommandIndex)
 		kv.notifyIfPresent(msg.CommandIndex, result)
@@ -175,28 +164,12 @@ func (kv *KVServer) run() {
 			kv.Lock()
 			if msg.CommandValid {
 				kv.handleValidCommand(msg)
-			} else { // command not valid
-				if cmd, ok := msg.Command.(string); ok {
-					if cmd == "LogTruncation" || cmd == "" {
-						if cmd == "" {
-							kv.snapshotIfNeeded(msg.CommandIndex)
-						}
-						reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
-						kv.notifyIfPresent(msg.CommandIndex, reply)
-					}
-					if cmd == "InstallSnapshot" {
-						kv.installSnapshot()
-						reply := notifyArgs{Term: msg.CommandTerm, Value: "", Err: WrongLeader}
-						for index, ch := range kv.notifyChanMap {
-							if index <= msg.CommandIndex {
-								ch <- reply
-								delete(kv.notifyChanMap, index)
-							}
-						}
-					}
-				}
+			} else if cmd, ok := msg.Command.(string); ok && cmd == "InstallSnapshot" {
+				kv.readSnapshot()
 			}
 			kv.Unlock()
+		case <-kv.shutdown:
+			return
 		}
 	}
 }
@@ -227,6 +200,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.shutdown = make(chan struct{})
 
 	kv.data = make(map[string]string)
 	kv.cache = make(map[int64]struct{})
