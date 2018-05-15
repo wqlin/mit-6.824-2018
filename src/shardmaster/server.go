@@ -6,6 +6,7 @@ import "sync"
 import (
 	"labgob"
 	"log"
+	"time"
 )
 
 const Debug = 0
@@ -74,85 +75,75 @@ func (sm *ShardMaster) notifyIfPresent(index int, reply notifyArgs) {
 	}
 }
 
-func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
+func (sm *ShardMaster) startOp(op Op) (Err, interface{}) {
+	index, term, ok := sm.rf.Start(op)
+	if !ok {
+		return WrongLeader, ""
+	}
 	sm.Lock()
+	notifyCh := make(chan notifyArgs)
+	sm.notifyChanMap[index] = notifyCh
+	sm.Unlock()
+	timeoutTimer := time.NewTimer(5 * time.Second)
+	for {
+		select {
+		case <-timeoutTimer.C:
+			sm.Lock()
+			delete(sm.notifyChanMap, index)
+			sm.Unlock()
+			return WrongLeader, ""
+		case result := <-notifyCh:
+			if result.Term != term {
+				return WrongLeader, ""
+			} else {
+				return OK, result.Args
+			}
+		}
+	}
+	return OK, ""
+}
+
+func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	arg := JoinArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Servers: make(map[int][]string)}
 	for gid, server := range args.Servers {
 		arg.Servers[gid] = append([]string{}, server...)
 	}
 	op := Op{Type: Join, Args: arg}
-	index, term, ok := sm.rf.Start(op)
-	if !ok {
-		sm.Unlock()
-		reply.Err = WrongLeader
-		return
-	}
-	notifyCh := make(chan notifyArgs)
-	sm.notifyChanMap[index] = notifyCh
-	sm.Unlock()
-	result := <-notifyCh
-	if result.Term != term {
-		reply.Err = WrongLeader
-	} else {
-		reply.Err = OK
-	}
+	err, _ := sm.startOp(op)
+	reply.Err = err
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
-	sm.Lock()
 	op := Op{Type: Leave, Args: LeaveArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, GIDs: append([]int{}, args.GIDs...)}}
-	index, term, ok := sm.rf.Start(op)
-	if !ok {
-		sm.Unlock()
-		reply.Err = WrongLeader
-		return
-	}
-	notifyCh := sm.makeNotifyCh(index)
-	sm.Unlock()
-	result := <-notifyCh
-	if result.Term != term {
-		reply.Err = WrongLeader
-	} else {
-		reply.Err = OK
-	}
+	err, _ := sm.startOp(op)
+	reply.Err = err
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
-	sm.Lock()
 	op := Op{Type: Move, Args: MoveArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Shard: args.Shard, GID: args.GID}}
-	index, term, ok := sm.rf.Start(op)
-	if !ok {
-		sm.Unlock()
-		reply.Err = WrongLeader
-		return
-	}
-	notifyCh := sm.makeNotifyCh(index)
-	sm.Unlock()
-	result := <-notifyCh
-	if result.Term != term {
-		reply.Err = WrongLeader
-	} else {
-		reply.Err = OK
-	}
+	err, _ := sm.startOp(op)
+	reply.Err = err
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	sm.Lock()
-	op := Op{Type: Query, Args: QueryArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Num: args.Num}}
-	index, term, ok := sm.rf.Start(op)
-	if !ok {
-		sm.Unlock()
-		reply.Err = WrongLeader
-		return
-	}
-	notifyCh := sm.makeNotifyCh(index)
-	sm.Unlock()
-	result := <-notifyCh
-	if result.Term != term {
-		reply.Err = WrongLeader
-	} else {
+	if args.Num > 0 && args.Num < sm.nextConfigIndex {
+		if _, isLeader := sm.rf.GetState(); !isLeader {
+			sm.Unlock()
+			reply.Err = WrongLeader
+			return
+		}
 		reply.Err = OK
-		reply.Config = result.Args.(Config)
+		reply.Config = sm.getConfig(args.Num)
+		sm.Unlock()
+	} else { // args.Num <= 0 || args.Num >= sm.nextConfigIndex
+		sm.Unlock()
+		op := Op{Type: Query, Args: QueryArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Num: args.Num}}
+		err, config := sm.startOp(op)
+		reply.Err = err
+		if err == OK {
+			reply.Config = config.(Config)
+		}
 	}
 }
 
