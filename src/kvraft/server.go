@@ -72,7 +72,7 @@ func (kv *KVServer) startOp(op Op) (Err, string) {
 	kv.notifyChanMap[index] = notifyCh
 	kv.Unlock()
 	DPrintf("%d start %d at %d", kv.me, op.RequestId, index)
-	timeoutTimer := time.NewTimer(5 *time.Second)
+	timeoutTimer := time.NewTimer(5 * time.Second)
 	for {
 		select {
 		case <-timeoutTimer.C:
@@ -102,7 +102,8 @@ func (kv *KVServer) snapshot(lastCommandIndex int) {
 }
 
 func (kv *KVServer) snapshotIfNeeded(lastCommandIndex int) {
-	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+	var threshold = int(1.5 * float64(kv.maxraftstate))
+	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
 		kv.snapshot(lastCommandIndex)
 	}
 }

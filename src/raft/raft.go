@@ -327,7 +327,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 	rf.setOrResetTimer(newRandDuration(HeartBeatTimeout)) // reset timer
 	if rf.commitIndex > oldCommitIndex {
-		go rf.notifyApply()
+		rf.notifyApplyCh <- struct{}{}
 	}
 }
 
@@ -359,6 +359,7 @@ func (rf *Raft) makeAppendEntriesCall(follower int) {
 		if !reply.Success {
 			if reply.Term > rf.currentTerm { // the leader is obsolete
 				rf.currentTerm, rf.state, rf.votedFor, rf.leaderId = reply.Term, Follower, -1, -1
+				rf.persist()
 				rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 			} else { // follower is inconsistent with leader
 				rf.nextIndex[follower] = Max(1, Min(reply.ConflictIndex, rf.logIndex))
@@ -382,21 +383,12 @@ func (rf *Raft) makeAppendEntriesCall(follower int) {
 				if count >= threshold {
 					rf.commitIndex = prevLogIndex + logEntriesLen // can commit log
 					rf.persist()
-					go rf.notifyApply()
+					rf.notifyApplyCh <- struct{}{}
 					DPrintf("Leader %d have following servers: %v replicating log and can update commit index to :%d", rf.me, agreedFollower, rf.commitIndex)
 				}
 			}
 		}
 		rf.Unlock()
-	}
-}
-
-func (rf *Raft) notifyReplicate() {
-	select {
-	case <-rf.shutdown:
-		return
-	default:
-		rf.notifyReplicateCh <- struct{}{}
 	}
 }
 
@@ -453,9 +445,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 		rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data)
 		if rf.commitIndex > oldCommitIndex {
-			go rf.notifyApply()
+			rf.notifyApplyCh <- struct{}{}
 		}
 	}
+	rf.persist()
 }
 
 // transfer snapshot in one RPC call
@@ -474,6 +467,7 @@ func (rf *Raft) makeInstallSnapshotCall(follower int) {
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
 			rf.state = Follower
+			rf.persist()
 			rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
 		} else {
 			rf.nextIndex[follower] = Max(rf.nextIndex[follower], rf.lastIncludedIndex+1)
@@ -513,7 +507,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = rf.logIndex
 		rf.logIndex += 1
 		rf.persist()
-		go rf.notifyReplicate()
+		rf.notifyReplicateCh <- struct{}{}
 		return index, rf.currentTerm, true
 	} else {
 		return -1, -1, false
@@ -540,11 +534,6 @@ func (rf *Raft) run() {
 	}
 }
 
-// notify to apply
-func (rf *Raft) notifyApply() {
-	rf.notifyApplyCh <- struct{}{}
-}
-
 func (rf *Raft) apply() {
 	for {
 		select {
@@ -561,8 +550,8 @@ func (rf *Raft) apply() {
 				startIndex, endIndex := rf.getOffsetIndex(rf.lastApplied+1), rf.getOffsetIndex(rf.commitIndex)
 				entries = append([]LogEntry{}, rf.log[startIndex:endIndex+1]...)
 				rf.lastApplied = rf.commitIndex
-				rf.persist()
 			}
+			rf.persist()
 			rf.Unlock()
 
 			for i := 0; i < len(entries); i++ {
@@ -617,8 +606,8 @@ Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan Apply
 	rf.shutdown = make(chan struct{})
 	rf.log = []LogEntry{{0, 0, nil}} // log entry at index 0 is unused
 	rf.applyCh = applyCh
-	rf.notifyApplyCh = make(chan struct{})
-	rf.notifyReplicateCh = make(chan struct{})
+	rf.notifyApplyCh = make(chan struct{}, 5000)
+	rf.notifyReplicateCh = make(chan struct{}, 5000)
 
 	rf.readPersistState() // initialize from state persisted before a crash
 	rf.setOrResetTimer(newRandDuration(HeartBeatTimeout))
