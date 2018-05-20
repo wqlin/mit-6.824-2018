@@ -29,13 +29,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 type ShardMaster struct {
 	sync.Mutex
-	me              int
-	rf              *raft.Raft
-	applyCh         chan raft.ApplyMsg
-	configs         []Config                // indexed by config num
-	nextConfigIndex int                     // index of next Config to be stored, initialized to 1
-	cache           map[int64]struct{}      // cache processed request, detect duplicate request
-	notifyChanMap   map[int]chan notifyArgs // notify RPC handler
+	me            int
+	rf            *raft.Raft
+	applyCh       chan raft.ApplyMsg
+	shutdown      chan struct{}
+	configs       []Config                // indexed by config num
+	cache         map[int64]struct{}      // cache processed request, detect duplicate request
+	notifyChanMap map[int]chan notifyArgs // notify RPC handler
 }
 
 type Op struct {
@@ -50,8 +50,8 @@ type notifyArgs struct {
 
 func (sm *ShardMaster) getConfig(i int) Config {
 	var srcConfig Config
-	if i < 0 || i >= sm.nextConfigIndex {
-		srcConfig = sm.configs[sm.nextConfigIndex-1]
+	if i < 0 || i >= len(sm.configs) {
+		srcConfig = sm.configs[len(sm.configs)-1]
 	} else {
 		srcConfig = sm.configs[i]
 	}
@@ -78,29 +78,26 @@ func (sm *ShardMaster) notifyIfPresent(index int, reply notifyArgs) {
 func (sm *ShardMaster) startOp(op Op) (Err, interface{}) {
 	index, term, ok := sm.rf.Start(op)
 	if !ok {
-		return WrongLeader, ""
+		return WrongLeader, struct{}{}
 	}
 	sm.Lock()
-	notifyCh := make(chan notifyArgs)
+	notifyCh := make(chan notifyArgs, 1)
 	sm.notifyChanMap[index] = notifyCh
 	sm.Unlock()
-	timeoutTimer := time.NewTimer(5 * time.Second)
-	for {
-		select {
-		case <-timeoutTimer.C:
-			sm.Lock()
-			delete(sm.notifyChanMap, index)
-			sm.Unlock()
-			return WrongLeader, ""
-		case result := <-notifyCh:
-			if result.Term != term {
-				return WrongLeader, ""
-			} else {
-				return OK, result.Args
-			}
+	select {
+	case <-time.After(3 * time.Second):
+		sm.Lock()
+		delete(sm.notifyChanMap, index)
+		sm.Unlock()
+		return WrongLeader, struct{}{}
+	case result := <-notifyCh:
+		if result.Term != term {
+			return WrongLeader, struct{}{}
+		} else {
+			return OK, result.Args
 		}
 	}
-	return OK, ""
+	return OK, struct{}{}
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
@@ -126,19 +123,17 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
-	sm.Lock()
-	if args.Num > 0 && args.Num < sm.nextConfigIndex {
-		if _, isLeader := sm.rf.GetState(); !isLeader {
-			sm.Unlock()
-			reply.Err = WrongLeader
-			return
-		}
-		reply.Err = OK
-		reply.Config = sm.getConfig(args.Num)
+	if _, isLeader := sm.rf.GetState(); !isLeader {
+		reply.Err = WrongLeader
+		return
+	}
+	if args.Num > 0 {
+		sm.Lock()
+		reply.Err, reply.Config = OK, sm.getConfig(args.Num)
 		sm.Unlock()
-	} else { // args.Num <= 0 || args.Num >= sm.nextConfigIndex
-		sm.Unlock()
-		op := Op{Type: Query, Args: QueryArgs{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Num: args.Num}}
+		return
+	} else { // args.Num <= 0
+		op := Op{Type: Query, Args: QueryArgs{Num: args.Num}}
 		err, config := sm.startOp(op)
 		reply.Err = err
 		if err == OK {
@@ -148,9 +143,8 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 }
 
 func (sm *ShardMaster) appendNewConfig(newConfig Config) {
-	newConfig.Num = sm.nextConfigIndex
+	newConfig.Num = len(sm.configs)
 	sm.configs = append(sm.configs, newConfig)
-	sm.nextConfigIndex += 1
 }
 
 func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
@@ -226,7 +220,6 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 					if shardsPerGID < 1 {
 						shardsPerGID = 1
 					}
-
 					GIDShardsCount := make(map[int]int)
 				loop:
 					for i, j := 0, 0; i < NShards; i++ {
@@ -267,7 +260,6 @@ func (sm *ShardMaster) handleValidCommand(msg raft.ApplyMsg) {
 			}
 		case Query:
 			arg := cmd.Args.(QueryArgs)
-			delete(sm.cache, arg.ExpireRequestId)
 			reply.Args = sm.getConfig(arg.Num)
 		}
 		sm.notifyIfPresent(msg.CommandIndex, reply)
@@ -281,14 +273,14 @@ func (sm *ShardMaster) run() {
 		case msg := <-sm.applyCh:
 			sm.Lock()
 			if msg.CommandValid {
+				DPrintf("%d new msg %#v", sm.me, msg)
 				sm.handleValidCommand(msg)
-			} else {
-				if cmd, ok := msg.Command.(string); ok && (cmd == "LogTruncation" || cmd == "") {
-					reply := notifyArgs{msg.CommandTerm, ""}
-					sm.notifyIfPresent(msg.CommandIndex, reply)
-				}
+			} else if cmd, ok := msg.Command.(string); ok && cmd == "NewLeader" {
+				sm.rf.Start("")
 			}
 			sm.Unlock()
+		case <-sm.shutdown:
+			return
 		}
 	}
 }
@@ -301,6 +293,7 @@ func (sm *ShardMaster) run() {
 //
 func (sm *ShardMaster) Kill() {
 	sm.rf.Kill()
+	close(sm.shutdown)
 }
 
 // needed by shardkv tester
@@ -326,9 +319,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
-	sm.nextConfigIndex = 1
 	sm.cache = make(map[int64]struct{})
 	sm.notifyChanMap = make(map[int]chan notifyArgs)
+	sm.shutdown = make(chan struct{})
 
 	go sm.run()
 

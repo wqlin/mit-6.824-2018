@@ -36,9 +36,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	requestId := time.Now().UnixNano()
-	args := QueryArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, Num: num}
-	ck.lastRequestId = requestId
+	args := QueryArgs{Num: num}
 loop:
 	var reply QueryReply
 	if ck.Call("ShardMaster.Query", &args, &reply) {

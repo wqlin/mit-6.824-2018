@@ -89,9 +89,7 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	RequestId       int64
-	ExpireRequestId int64
-	Num             int // desired config number
+	Num int
 }
 
 type QueryReply struct {

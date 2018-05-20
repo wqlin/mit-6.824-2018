@@ -80,6 +80,13 @@ func (cfg *config) cleanup() {
 	for gi := 0; gi < cfg.ngroups; gi++ {
 		cfg.ShutdownGroup(gi)
 	}
+	cfg.mu.Lock()
+	for i := 0; i < len(cfg.masterservers); i ++ {
+		if cfg.masterservers[i] != nil {
+			cfg.masterservers[i].Kill()
+		}
+	}
+	cfg.mu.Unlock()
 	cfg.net.Cleanup()
 	cfg.checkTimeout()
 }

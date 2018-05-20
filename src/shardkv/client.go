@@ -12,7 +12,9 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "shardmaster"
-import "time"
+import (
+	"time"
+)
 
 //
 // which shard is a key in?
@@ -36,10 +38,10 @@ func nrand() int64 {
 }
 
 type Clerk struct {
-	sm       *shardmaster.Clerk
-	config   shardmaster.Config
-	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+	sm            *shardmaster.Clerk
+	config        shardmaster.Config
+	make_end      func(string) *labrpc.ClientEnd
+	lastRequestId int64
 }
 
 //
@@ -55,7 +57,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	ck.lastRequestId = 0
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -66,29 +69,35 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-
+	requestId := time.Now().UnixNano()
+	args := GetArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, ConfigNum: ck.config.Num, Key: key}
+	ck.lastRequestId = requestId
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
+		loop:
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
+				// DPrintf("%d [GET %s id %d from %d-%d] shard %d config %d", runtime.NumGoroutine(), args.Key, args.RequestId, gid, si, shard, ck.config.Num)
+				if srv.Call("ShardKV.Get", &args, &reply) {
+					if reply.Err == OK {
+						// DPrintf("%d [GET SUCCESS %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						return reply.Value
+					} else if reply.Err == ErrWrongGroup {
+						break loop
+						// DPrintf("%d [GET Wrong Group %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.RequestId, gid, si, shard, ck.config.Num, reply)
+					} else {
+						// DPrintf("%d [GET Wrong Leader %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.RequestId, gid, si, shard, ck.config.Num, reply)
+					}
 				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 
 	return ""
@@ -99,37 +108,57 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
-
+	requestId := time.Now().UnixNano()
+	args := PutAppendArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, ConfigNum: ck.config.Num, Key: key, Value: value, Op: op}
+	ck.lastRequestId = requestId
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
+		loop:
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.WrongLeader == false && reply.Err == OK {
-					return
-				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
+				//if op == "Put" {
+				//	DPrintf("%d [PUT %s %s id %d from %d-%d] shard %d config %d", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num)
+				//} else {
+				//	DPrintf("%d [APPEND %s %s id %d from %d-%d] shard %d config %d", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num)
+				//}
+				if srv.Call("ShardKV.PutAppend", &args, &reply) {
+					if reply.Err == OK {
+						//if op == "Put" {
+						//	DPrintf("%d [PUT SUCCESS %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//} else {
+						//	DPrintf("%d [APPEND SUCCESS %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//}
+						return
+					} else if reply.Err == ErrWrongGroup {
+						//if op == "Put" {
+						//	DPrintf("%d [PUT Wrong Group %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//} else {
+						//	DPrintf("%d [APPEND Wrong Group %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//}
+						break loop
+					} else {
+						//if op == "Put" {
+						//	DPrintf("%d [PUT WRONG Leader %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//} else {
+						//	DPrintf("%d [APPEND WRONG Leader %s value %s id %d from %d-%d] shard %d config %d reply %v", runtime.NumGoroutine(), args.Key, args.Value, args.RequestId, gid, si, shard, ck.config.Num, reply)
+						//}
+					}
 				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
