@@ -68,26 +68,20 @@ func (kv *KVServer) startOp(op Op) (Err, string) {
 		return WrongLeader, ""
 	}
 	kv.Lock()
-	notifyCh := make(chan notifyArgs)
+	notifyCh := make(chan notifyArgs, 1)
 	kv.notifyChanMap[index] = notifyCh
 	kv.Unlock()
-	DPrintf("%d start %d at %d", kv.me, op.RequestId, index)
-	timeoutTimer := time.NewTimer(5 * time.Second)
-	for {
-		select {
-		case <-timeoutTimer.C:
-			kv.Lock()
-			delete(kv.notifyChanMap, index)
-			kv.Unlock()
-			DPrintf("%d delete %d channel at %d", kv.me, op.RequestId, index)
+	select {
+	case <-time.After(3 * time.Second):
+		kv.Lock()
+		delete(kv.notifyChanMap, index)
+		kv.Unlock()
+		return WrongLeader, ""
+	case result := <-notifyCh:
+		if result.Term != term {
 			return WrongLeader, ""
-		case result := <-notifyCh:
-			DPrintf("%d get %d reply %v at %d", kv.me, op.RequestId, result, index)
-			if result.Term != term {
-				return WrongLeader, ""
-			} else {
-				return result.Err, result.Value
-			}
+		} else {
+			return result.Err, result.Value
 		}
 	}
 	return OK, ""
@@ -152,9 +146,9 @@ func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
 			}
 			kv.cache[cmd.RequestId] = struct{}{}
 		}
-		kv.snapshotIfNeeded(msg.CommandIndex)
 		kv.notifyIfPresent(msg.CommandIndex, result)
 	}
+	kv.snapshotIfNeeded(msg.CommandIndex)
 }
 
 func (kv *KVServer) run() {
@@ -165,8 +159,12 @@ func (kv *KVServer) run() {
 			kv.Lock()
 			if msg.CommandValid {
 				kv.handleValidCommand(msg)
-			} else if cmd, ok := msg.Command.(string); ok && cmd == "InstallSnapshot" {
-				kv.readSnapshot()
+			} else if cmd, ok := msg.Command.(string); ok {
+				if cmd == "InstallSnapshot" {
+					kv.readSnapshot()
+				} else if cmd == "NewLeader" {
+					kv.rf.Start("")
+				}
 			}
 			kv.Unlock()
 		case <-kv.shutdown:
