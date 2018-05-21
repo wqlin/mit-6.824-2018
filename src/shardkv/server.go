@@ -294,8 +294,6 @@ func (kv *ShardKV) makeShardCleanupCall(shard int, configNum int) {
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	close(kv.shutdown)
-	kv.mu.Lock()
-	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) handleValidCommand(msg raft.ApplyMsg, isReplay bool) {
