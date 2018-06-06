@@ -211,7 +211,7 @@ func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigratio
 }
 
 // pull shard from other group
-func (kv *ShardKV) makeShardMigrationCall(shard int, oldConfigNum int) {
+func (kv *ShardKV) pullShard(shard int, oldConfigNum int) {
 	kv.mu.Lock()
 	oldConfig := kv.historyConfigs[oldConfigNum]
 	kv.mu.Unlock()
@@ -399,13 +399,13 @@ func (kv *ShardKV) handleReconfiguration(msg raft.ApplyMsg, isReplay bool) {
 		}
 		if !isReplay {
 			for shard, config := range kv.waitingShards {
-				go kv.makeShardMigrationCall(shard, config)
+				go kv.pullShard(shard, config)
 			}
 		}
 	}
 }
 
-func (kv *ShardKV) shardManagement() {
+func (kv *ShardKV) pullShards() {
 	waitingTimer := time.NewTimer(1 * time.Second)
 	for {
 		select {
@@ -416,7 +416,7 @@ func (kv *ShardKV) shardManagement() {
 			kv.mu.Lock()
 			if _, isLeader := kv.rf.GetState(); isLeader {
 				for shard, configNum := range kv.waitingShards {
-					go kv.makeShardMigrationCall(shard, configNum)
+					go kv.pullShard(shard, configNum)
 				}
 			}
 			kv.mu.Unlock()
@@ -465,7 +465,7 @@ func (kv *ShardKV) run() {
 				} else if cmd == "ReplayDone" {
 					isReplay = false
 					go kv.pollShardMaster()
-					go kv.shardManagement()
+					go kv.pullShards()
 					for configNum, shards := range kv.cleaningShards {
 						for shard := range shards {
 							go kv.makeShardCleanupCall(shard, configNum)
