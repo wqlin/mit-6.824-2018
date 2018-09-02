@@ -11,6 +11,7 @@ import "math/big"
 
 type Clerk struct {
 	servers       []*labrpc.ClientEnd
+	clientId      int64
 	lastRequestId int64
 	leaderId      int
 }
@@ -30,6 +31,7 @@ func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clientId = nrand()
 	ck.lastRequestId = 0
 	ck.leaderId = 0
 	return ck
@@ -55,7 +57,7 @@ loop:
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := JoinArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, Servers: servers}
 	ck.lastRequestId = requestId
 loop:
@@ -75,7 +77,7 @@ loop:
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := LeaveArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, GIDs: gids}
 	ck.lastRequestId = requestId
 loop:

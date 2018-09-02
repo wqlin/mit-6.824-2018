@@ -5,11 +5,13 @@ import "crypto/rand"
 import (
 	"math/big"
 	"time"
-	"raft"
 )
+
+const RetryInterval = time.Duration(10 * time.Millisecond)
 
 type Clerk struct {
 	servers       []*labrpc.ClientEnd
+	clientId      int64
 	lastRequestId int64
 	leaderId      int
 }
@@ -28,59 +30,45 @@ func (ck *Clerk) Call(rpcname string, args interface{}, reply interface{}) bool 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clientId = nrand()
 	ck.lastRequestId = 0
 	ck.leaderId = 0
 	return ck
 }
 
 func (ck *Clerk) Get(key string) string {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := GetArgs{requestId, ck.lastRequestId, key}
 	ck.lastRequestId = requestId
-	oldLeaderID := ck.leaderId
 	for {
 		var reply GetReply
-		DPrintf("[%d GET %s id %d]", ck.leaderId, args.Key, args.RequestId)
-		if ck.Call("KVServer.Get", &args, &reply) {
-			DPrintf("[%d GET %s id %d reply %#v]", ck.leaderId, args.Key, args.RequestId, reply)
-			if reply.Err == OK {
-				return reply.Value
-			}
+		// DPrintf("[%d GET %s]", ck.leaderId, args.Key)
+		if ck.Call("KVServer.Get", &args, &reply) && reply.Err == OK {
+			DPrintf("[%d GET key %s reply %#v]", ck.leaderId, args.Key, reply)
+			return reply.Value
 		}
 		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-		if ck.leaderId == oldLeaderID {
-			time.Sleep(raft.ElectionTimeout)
-		}
+		time.Sleep(RetryInterval)
 	}
 	return ""
 }
 
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := PutAppendArgs{requestId, ck.lastRequestId, key, value, op}
 	ck.lastRequestId = requestId
-	oldLeaderID := ck.leaderId
 	for {
 		var reply PutAppendReply
-		if op == "Put" {
-			DPrintf("[%d PUT %s value %s id %d]", ck.leaderId, args.Key, args.Value, args.RequestId)
-		} else {
-			DPrintf("[%d APPEND %s value %s id %d]", ck.leaderId, args.Key, args.Value, args.RequestId)
-		}
-		if ck.Call("KVServer.PutAppend", &args, &reply) {
+		if ck.Call("KVServer.PutAppend", &args, &reply) && reply.Err == OK {
 			if op == "Put" {
-				DPrintf("[%d PUT %s value %s id %d reply %#v]", ck.leaderId, args.Key, args.Value, args.RequestId, reply)
+				DPrintf("[%d PUT key %s value %s id %d reply %v]", ck.leaderId, args.Key, args.Value, args.RequestId, reply)
 			} else {
-				DPrintf("[%d APPEND %s value %s id %d reply %#v]", ck.leaderId, args.Key, args.Value, args.RequestId, reply)
+				DPrintf("[%d APPEND key %s value %s id %d reply %v]", ck.leaderId, args.Key, args.Value, args.RequestId, reply)
 			}
-			if reply.Err == OK {
-				return
-			}
+			return
 		}
 		ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
-		if ck.leaderId == oldLeaderID {
-			time.Sleep(raft.ElectionTimeout)
-		}
+		time.Sleep(RetryInterval)
 	}
 }
 

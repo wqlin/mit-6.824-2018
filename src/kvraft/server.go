@@ -11,6 +11,7 @@ import (
 )
 
 const Debug = 0
+const StartTimeoutInterval = time.Duration(1500 * time.Millisecond)
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -62,24 +63,24 @@ func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 	}
 }
 
-func (kv *KVServer) startOp(op Op) (Err, string) {
+func (kv *KVServer) start(op Op) (Err, string) {
 	index, term, ok := kv.rf.Start(op)
 	if !ok {
-		return WrongLeader, ""
+		return ErrWrongLeader, ""
 	}
 	kv.Lock()
 	notifyCh := make(chan notifyArgs, 1)
 	kv.notifyChanMap[index] = notifyCh
 	kv.Unlock()
 	select {
-	case <-time.After(3 * time.Second):
+	case <-time.After(StartTimeoutInterval):
 		kv.Lock()
 		delete(kv.notifyChanMap, index)
 		kv.Unlock()
-		return WrongLeader, ""
+		return ErrWrongLeader, ""
 	case result := <-notifyCh:
 		if result.Term != term {
-			return WrongLeader, ""
+			return ErrWrongLeader, ""
 		} else {
 			return result.Err, result.Value
 		}
@@ -116,15 +117,11 @@ func (kv *KVServer) readSnapshot() {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	op := Op{RequestId: args.RequestId, ExpireRequestId: args.ExpireRequestId, Key: args.Key, Value: "", Op: "Get"}
-	err, value := kv.startOp(op)
-	reply.Err, reply.Value = err, value
+	reply.Err, reply.Value = kv.start(Op{args.RequestId, args.ExpireRequestId, args.Key, "", "Get"})
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	op := Op{RequestId: args.RequestId, Key: args.Key, Value: args.Value, Op: args.Op}
-	err, _ := kv.startOp(op)
-	reply.Err = err
+	reply.Err, _ = kv.start(Op{args.RequestId, args.ExpireRequestId, args.Key, args.Value, args.Op})
 }
 
 func (kv *KVServer) Kill() {
@@ -132,7 +129,7 @@ func (kv *KVServer) Kill() {
 	close(kv.shutdown)
 }
 
-func (kv *KVServer) handleValidCommand(msg raft.ApplyMsg) {
+func (kv *KVServer) apply(msg raft.ApplyMsg) {
 	if cmd, ok := msg.Command.(Op); ok {
 		delete(kv.cache, cmd.ExpireRequestId) // delete older request
 		result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
@@ -158,7 +155,7 @@ func (kv *KVServer) run() {
 		case msg := <-kv.applyCh:
 			kv.Lock()
 			if msg.CommandValid {
-				kv.handleValidCommand(msg)
+				kv.apply(msg)
 			} else if cmd, ok := msg.Command.(string); ok {
 				if cmd == "InstallSnapshot" {
 					kv.readSnapshot()

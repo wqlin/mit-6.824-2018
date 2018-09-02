@@ -41,6 +41,7 @@ type Clerk struct {
 	sm            *shardmaster.Clerk
 	config        shardmaster.Config
 	make_end      func(string) *labrpc.ClientEnd
+	clientId      int64
 	lastRequestId int64
 }
 
@@ -57,6 +58,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
+	ck.clientId = nrand()
 	ck.lastRequestId = 0
 	ck.config = ck.sm.Query(-1)
 	return ck
@@ -69,7 +71,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := GetArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, ConfigNum: ck.config.Num, Key: key}
 	ck.lastRequestId = requestId
 	for {
@@ -108,7 +110,7 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	requestId := time.Now().UnixNano()
+	requestId := time.Now().UnixNano() - ck.clientId
 	args := PutAppendArgs{RequestId: requestId, ExpireRequestId: ck.lastRequestId, ConfigNum: ck.config.Num, Key: key, Value: value, Op: op}
 	ck.lastRequestId = requestId
 	for {

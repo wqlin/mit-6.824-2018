@@ -1,15 +1,15 @@
 package raftkv
 
 const (
-	OK          = "OK"
-	ErrNoKey    = "ErrNoKey"
-	WrongLeader = "WrongLeader"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongLeader = "ErrWrongLeader"
 )
 
 type Err string
 
 type PutAppendArgs struct {
-	RequestId       int64 // use current nanosecond time to uniquely identify each operation
+	RequestId       int64
 	ExpireRequestId int64
 	Key             string
 	Value           string
@@ -21,7 +21,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	RequestId       int64 // use current nanosecond time to uniquely identify each operation
+	RequestId       int64
 	ExpireRequestId int64
 	Key             string
 }
