@@ -28,32 +28,18 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (config Config) Copy() Config {
+	newConfig := Config{Num: config.Num, Shards: config.Shards, Groups: make(map[int][]string)}
+	for gid, servers := range config.Groups {
+		newConfig.Groups[gid] = append([]string{}, servers...)
+	}
+	return newConfig
+}
+
 const (
 	OK          = "OK"
 	WrongLeader = "WrongLeader"
 )
-
-type RequestType int
-
-const (
-	Join  RequestType = iota
-	Leave
-	Move
-	Query
-)
-
-func (t RequestType) String() string {
-	switch t {
-	case Join:
-		return "Join"
-	case Leave:
-		return "Leave"
-	case Move:
-		return "Move"
-	default:
-		return "Query"
-	}
-}
 
 type Err string
 
@@ -61,6 +47,14 @@ type JoinArgs struct {
 	RequestId       int64
 	ExpireRequestId int64
 	Servers         map[int][]string // new GID -> servers mappings
+}
+
+func (arg *JoinArgs) copy() JoinArgs {
+	result := JoinArgs{arg.RequestId, arg.ExpireRequestId, make(map[int][]string)}
+	for gid, server := range arg.Servers {
+		result.Servers[gid] = append([]string{}, server...)
+	}
+	return result
 }
 
 type JoinReply struct {
@@ -71,6 +65,10 @@ type LeaveArgs struct {
 	RequestId       int64
 	ExpireRequestId int64
 	GIDs            []int
+}
+
+func (arg *LeaveArgs) copy() LeaveArgs {
+	return LeaveArgs{arg.RequestId, arg.ExpireRequestId, append([]int{}, arg.GIDs...)}
 }
 
 type LeaveReply struct {
@@ -84,12 +82,20 @@ type MoveArgs struct {
 	GID             int
 }
 
+func (arg *MoveArgs) copy() MoveArgs {
+	return MoveArgs{arg.RequestId, arg.ExpireRequestId, arg.Shard, arg.GID}
+}
+
 type MoveReply struct {
 	Err Err
 }
 
 type QueryArgs struct {
 	Num int
+}
+
+func (arg *QueryArgs) copy() QueryArgs {
+	return QueryArgs{arg.Num}
 }
 
 type QueryReply struct {

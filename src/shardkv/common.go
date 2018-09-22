@@ -1,10 +1,10 @@
 package shardkv
 
 const (
-	OK                  = "OK"
-	ErrNoKey            = "ErrNoKey"
-	ErrWrongGroup       = "ErrWrongGroup"
-	ErrWrongLeader      = "ErrWrongLeader"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongGroup  = "ErrWrongGroup"
+	ErrWrongLeader = "ErrWrongLeader"
 )
 
 type Err string
@@ -13,14 +13,6 @@ type RequestType int
 
 type IntSet map[int]struct{}
 type StringSet map[string]struct{}
-
-const (
-	Get                   RequestType = iota
-	PutAppend
-	Reconfiguration
-	AddWaitingShard
-	MigratingShardCleanup
-)
 
 // Put or Append
 type PutAppendArgs struct {
@@ -48,6 +40,14 @@ type GetReply struct {
 	Value string
 }
 
+func (arg *GetArgs) copy() GetArgs {
+	return GetArgs{arg.RequestId, arg.ExpireRequestId, arg.ConfigNum, arg.Key}
+}
+
+func (arg *PutAppendArgs) copy() PutAppendArgs {
+	return PutAppendArgs{arg.RequestId, arg.ExpireRequestId, arg.ConfigNum, arg.Key, arg.Value, arg.Op}
+}
+
 type ShardMigrationArgs struct {
 	Shard     int
 	ConfigNum int
@@ -68,6 +68,10 @@ type ShardMigrationReply struct {
 type ShardCleanupArgs struct {
 	Shard     int
 	ConfigNum int
+}
+
+func (arg *ShardCleanupArgs) copy() ShardCleanupArgs {
+	return ShardCleanupArgs{arg.Shard, arg.ConfigNum}
 }
 
 type ShardCleanupReply struct {
