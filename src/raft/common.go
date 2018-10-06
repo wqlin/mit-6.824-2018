@@ -1,13 +1,49 @@
 package raft
 
-type serverState int32
+import "log"
+
+// Debugging
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+func Min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func Max(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
+type Err string
+
 const (
-	Leader    serverState = iota
+	OK         = "OK"
+	ErrRPCFail = "ErrRPCFail"
+)
+
+type serverState int32
+
+const (
+	Leader serverState = iota
 	Follower
 	Candidate
 )
 
-func (state serverState) String() string{
+func (state serverState) String() string {
 	switch state {
 	case Leader:
 		return "Leader"
@@ -40,6 +76,8 @@ type RequestVoteArgs struct {
 }
 
 type RequestVoteReply struct {
+	Err         Err
+	Server      int
 	VoteGranted bool // true means candidate received vote
 	Term        int  // current term from other servers
 }
@@ -55,19 +93,20 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
-	Term    int
+	Success       bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term          int
 	ConflictIndex int // in case of conflicting, follower include the first index it store for conflict term
 }
 
 type InstallSnapshotArgs struct {
-	Term int
-	LeaderId int
+	Term              int
+	LeaderId          int
 	LastIncludedIndex int
-	LastIncludedTerm int
-	Data []byte
+	LastIncludedTerm  int
+	Data              []byte
 }
 
 type InstallSnapshotReply struct {
+	Err Err
 	Term int
 }

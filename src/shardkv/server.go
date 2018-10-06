@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-const Debug = 0
-const PollingInterval = time.Millisecond * time.Duration(150)
-const CleaningInterval = time.Second * time.Duration(2)
+const PollInterval = time.Duration(250 * time.Millisecond)
+const PullInterval = time.Duration(150 * time.Millisecond)
+const CleanInterval = time.Duration(150 * time.Millisecond)
+const StartTimeoutInterval = time.Duration(3 * time.Second)
+const SnapshotThreshold = 1.8
 
 func init() {
 	labgob.Register(GetArgs{})
@@ -25,13 +27,6 @@ func init() {
 	labgob.Register(shardmaster.Config{})
 	labgob.Register(MigrationData{})
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-}
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
 }
 
 type notifyArgs struct {
@@ -64,13 +59,10 @@ type ShardKV struct {
 	data          map[string]string
 	cache         map[int64]string // key -> id of request, value -> key of data
 	notifyChanMap map[int]chan notifyArgs
-}
 
-func (kv *ShardKV) notifyIfPresent(index int, reply notifyArgs) {
-	if ch, ok := kv.notifyChanMap[index]; ok {
-		ch <- reply
-		delete(kv.notifyChanMap, index)
-	}
+	pollTimer  *time.Timer // when time out, poll shard master to see if there is new configuration
+	pullTimer  *time.Timer // when time out, if server is leader and waitingShards is not empty, pull shard from other group
+	cleanTimer *time.Timer // when time out, if server is leader and cleaningShards is not empty, clean shard in other group
 }
 
 func (kv *ShardKV) snapshot(lastCommandIndex int) {
@@ -91,7 +83,7 @@ func (kv *ShardKV) snapshot(lastCommandIndex int) {
 }
 
 func (kv *ShardKV) snapshotIfNeeded(lastCommandIndex int) {
-	var threshold = int(1.5 * float64(kv.maxraftstate))
+	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
 	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
 		kv.snapshot(lastCommandIndex)
 	}
@@ -125,9 +117,12 @@ func (kv *ShardKV) readSnapshot() {
 }
 
 // string is used in get
-func (kv *ShardKV) start(args interface{}) (Err, string) {
+func (kv *ShardKV) start(configNum int, args interface{}) (Err, string) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	if configNum != kv.config.Num {
+		return ErrWrongGroup, ""
+	}
 	index, term, ok := kv.rf.Start(args)
 	if !ok {
 		return ErrWrongLeader, ""
@@ -136,7 +131,7 @@ func (kv *ShardKV) start(args interface{}) (Err, string) {
 	kv.notifyChanMap[index] = notifyCh
 	kv.mu.Unlock()
 	select {
-	case <-time.After(3 * time.Second):
+	case <-time.After(StartTimeoutInterval):
 		kv.mu.Lock()
 		delete(kv.notifyChanMap, index)
 		return ErrWrongLeader, ""
@@ -152,16 +147,14 @@ func (kv *ShardKV) start(args interface{}) (Err, string) {
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	err, value := kv.start(args.copy())
-	reply.Err, reply.Value = err, value
+	reply.Err, reply.Value = kv.start(args.ConfigNum, args.copy())
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	err, _ := kv.start(args.copy())
-	reply.Err = err
+	reply.Err, _ = kv.start(args.ConfigNum, args.copy())
 }
 
-// shard migration RPC handler
+// when shards is moved between groups, the replica in target group use this RPC handler to pull data from source group
 func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigrationReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -183,26 +176,7 @@ func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigratio
 	}
 }
 
-// pull shard from other group
-func (kv *ShardKV) pullShard(shard int, oldConfig shardmaster.Config) {
-	configNum := oldConfig.Num
-	gid := oldConfig.Shards[shard]
-	servers := oldConfig.Groups[gid]
-	args := ShardMigrationArgs{Shard: shard, ConfigNum: configNum}
-
-	for si, server := range servers {
-		srv := kv.make_end(server)
-		var reply ShardMigrationReply
-		if srv.Call("ShardKV.ShardMigration", &args, &reply) {
-			if reply.Err == OK {
-				DPrintf("%d-%d pull shard %d at %d from %d-%d SUCCESS", kv.gid, kv.me, shard, configNum, gid, si)
-				kv.start(reply)
-				return
-			}
-		}
-	}
-}
-
+// when target group finish shard migration, the replica uses this RPC handler to clean up useless shard in source group
 func (kv *ShardKV) ShardCleanup(args *ShardCleanupArgs, reply *ShardCleanupReply) {
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
@@ -214,34 +188,17 @@ func (kv *ShardKV) ShardCleanup(args *ShardCleanupArgs, reply *ShardCleanupReply
 	if _, ok := kv.migratingShards[args.ConfigNum]; ok {
 		if _, ok := kv.migratingShards[args.ConfigNum][args.Shard]; ok {
 			kv.mu.Unlock()
-			result, _ := kv.start(args.copy())
+			result, _ := kv.start(kv.getConfigNum(), args.copy())
 			reply.Err = result
 			kv.mu.Lock()
 		}
 	}
 }
 
-func (kv *ShardKV) cleanShard(shard int, config shardmaster.Config) {
-	configNum := config.Num
-	args := ShardCleanupArgs{Shard: shard, ConfigNum: configNum}
-	gid := config.Shards[shard]
-	servers := config.Groups[gid]
-	for _, server := range servers {
-		srv := kv.make_end(server)
-		var reply ShardCleanupReply
-		if srv.Call("ShardKV.ShardCleanup", &args, &reply) {
-			if reply.Err == OK {
-				kv.mu.Lock()
-				delete(kv.cleaningShards[configNum], shard)
-				if len(kv.cleaningShards[configNum]) == 0 {
-					delete(kv.cleaningShards, configNum)
-					DPrintf("%d-%d clean shard %d at %d success, cleaningShards %v", kv.gid, kv.me, shard, configNum, kv.cleaningShards)
-				}
-				kv.mu.Unlock()
-				return
-			}
-		}
-	}
+func (kv *ShardKV) getConfigNum() int {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.config.Num
 }
 
 func (kv *ShardKV) Kill() {
@@ -306,6 +263,13 @@ func (kv *ShardKV) apply(msg raft.ApplyMsg) {
 	kv.notifyIfPresent(msg.CommandIndex, result)
 }
 
+func (kv *ShardKV) notifyIfPresent(index int, reply notifyArgs) {
+	if ch, ok := kv.notifyChanMap[index]; ok {
+		ch <- reply
+		delete(kv.notifyChanMap, index)
+	}
+}
+
 func (kv *ShardKV) applyNewConf(newConfig shardmaster.Config) {
 	if newConfig.Num <= kv.config.Num {
 		return
@@ -345,39 +309,117 @@ func (kv *ShardKV) applyNewConf(newConfig shardmaster.Config) {
 	}
 }
 
+func (kv *ShardKV) poll() {
+	kv.mu.Lock()
+	defer kv.pollTimer.Reset(PollInterval)
+	if _, isLeader := kv.rf.GetState(); !isLeader || len(kv.waitingShards) != 0 || len(kv.cleaningShards) != 0 {
+		kv.mu.Unlock()
+		return
+	}
+	nextConfigNum := kv.config.Num + 1
+	kv.mu.Unlock()
+	newConfig := kv.mck.Query(nextConfigNum)
+	if newConfig.Num == nextConfigNum {
+		kv.rf.Start(newConfig)
+	}
+}
+
+func (kv *ShardKV) pull() {
+	kv.mu.Lock()
+	defer kv.pullTimer.Reset(PullInterval)
+	if _, isLeader := kv.rf.GetState(); !isLeader || len(kv.waitingShards) == 0 {
+		kv.mu.Unlock()
+		return
+	}
+	ch, count := make(chan struct{}), 0
+	for shard, configNum := range kv.waitingShards {
+		go func(shard int, config shardmaster.Config) {
+			kv.doPull(shard, config)
+			ch <- struct{}{}
+		}(shard, kv.historyConfigs[configNum].Copy())
+		count ++
+	}
+	kv.mu.Unlock()
+	for count > 0 {
+		<-ch
+		count--
+	}
+}
+
+// pull shard from other group
+func (kv *ShardKV) doPull(shard int, oldConfig shardmaster.Config) {
+	configNum := oldConfig.Num
+	gid := oldConfig.Shards[shard]
+	servers := oldConfig.Groups[gid]
+	args := ShardMigrationArgs{Shard: shard, ConfigNum: configNum}
+	for _, server := range servers {
+		srv := kv.make_end(server)
+		var reply ShardMigrationReply
+		if srv.Call("ShardKV.ShardMigration", &args, &reply) && reply.Err == OK {
+			kv.start(kv.getConfigNum(), reply)
+			return
+		}
+	}
+}
+
+// clean shard in other group
+func (kv *ShardKV) clean() {
+	kv.mu.Lock()
+	defer kv.cleanTimer.Reset(CleanInterval)
+	if len(kv.cleaningShards) == 0 {
+		kv.mu.Unlock()
+		return
+	}
+	ch, count := make(chan struct{}), 0
+	for configNum, shards := range kv.cleaningShards {
+		config := kv.historyConfigs[configNum].Copy()
+		for shard := range shards {
+			go func(shard int, config shardmaster.Config) {
+				kv.doClean(shard, config)
+				ch <- struct{}{}
+			}(shard, config)
+			count ++
+		}
+	}
+	kv.mu.Unlock()
+	for count > 0 {
+		<-ch
+		count --
+	}
+}
+
+func (kv *ShardKV) doClean(shard int, config shardmaster.Config) {
+	configNum := config.Num
+	args := ShardCleanupArgs{Shard: shard, ConfigNum: configNum}
+	gid := config.Shards[shard]
+	servers := config.Groups[gid]
+	for _, server := range servers {
+		srv := kv.make_end(server)
+		var reply ShardCleanupReply
+		if srv.Call("ShardKV.ShardCleanup", &args, &reply) && reply.Err == OK {
+			kv.mu.Lock()
+			delete(kv.cleaningShards[configNum], shard)
+			if len(kv.cleaningShards[configNum]) == 0 {
+				delete(kv.cleaningShards, configNum)
+				DPrintf("%d-%d clean shard %d at %d success, cleaningShards %v", kv.gid, kv.me, shard, configNum, kv.cleaningShards)
+			}
+			kv.mu.Unlock()
+			return
+		}
+	}
+}
+
 func (kv *ShardKV) tick() {
-	pollingTimer := time.NewTimer(PollingInterval)
-	cleanTimer := time.NewTimer(CleaningInterval)
 	for {
 		select {
 		case <-kv.shutdown:
 			return
-		case <-pollingTimer.C:
-			pollingTimer.Reset(PollingInterval)
-			kv.mu.Lock()
-			if len(kv.waitingShards) == 0 {
-				nextConfigNum := kv.config.Num + 1
-				kv.mu.Unlock()
-				newConfig := kv.mck.Query(nextConfigNum)
-				kv.mu.Lock()
-				if newConfig.Num > kv.config.Num {
-					kv.rf.Start(newConfig)
-				}
-			} else if _, isLeader := kv.rf.GetState(); isLeader {
-				for shard, configNum := range kv.waitingShards {
-					go kv.pullShard(shard, kv.historyConfigs[configNum])
-				}
-			}
-			kv.mu.Unlock()
-		case <-cleanTimer.C:
-			cleanTimer.Reset(CleaningInterval)
-			kv.mu.Lock()
-			for configNum, shards := range kv.cleaningShards {
-				for shard := range shards {
-					go kv.cleanShard(shard, kv.historyConfigs[configNum])
-				}
-			}
-			kv.mu.Unlock()
+		case <-kv.pollTimer.C:
+			go kv.poll()
+		case <-kv.pullTimer.C:
+			go kv.pull()
+		case <-kv.cleanTimer.C:
+			go kv.clean()
 		}
 	}
 }
@@ -431,6 +473,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.data = make(map[string]string)
 	kv.cache = make(map[int64]string)
 	kv.notifyChanMap = make(map[int]chan notifyArgs)
+
+	kv.pollTimer = time.NewTimer(time.Duration(0))
+	kv.pullTimer = time.NewTimer(time.Duration(0))
+	kv.cleanTimer = time.NewTimer(time.Duration(0))
 	go kv.run()
 	return kv
 }

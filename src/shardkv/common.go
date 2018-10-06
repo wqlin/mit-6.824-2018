@@ -1,5 +1,7 @@
 package shardkv
 
+import "log"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -13,6 +15,15 @@ type RequestType int
 
 type IntSet map[int]struct{}
 type StringSet map[string]struct{}
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 // Put or Append
 type PutAppendArgs struct {
@@ -29,10 +40,8 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	RequestId       int64
-	ExpireRequestId int64
-	ConfigNum       int
-	Key             string
+	ConfigNum int
+	Key       string
 }
 
 type GetReply struct {
@@ -41,11 +50,11 @@ type GetReply struct {
 }
 
 func (arg *GetArgs) copy() GetArgs {
-	return GetArgs{arg.RequestId, arg.ExpireRequestId, arg.ConfigNum, arg.Key}
+	return GetArgs{ConfigNum: arg.ConfigNum, Key: arg.Key}
 }
 
 func (arg *PutAppendArgs) copy() PutAppendArgs {
-	return PutAppendArgs{arg.RequestId, arg.ExpireRequestId, arg.ConfigNum, arg.Key, arg.Value, arg.Op}
+	return PutAppendArgs{RequestId: arg.RequestId, ExpireRequestId: arg.ExpireRequestId, ConfigNum: arg.ConfigNum, Key: arg.Key, Value: arg.Value, Op: arg.Op}
 }
 
 type ShardMigrationArgs struct {
@@ -71,7 +80,7 @@ type ShardCleanupArgs struct {
 }
 
 func (arg *ShardCleanupArgs) copy() ShardCleanupArgs {
-	return ShardCleanupArgs{arg.Shard, arg.ConfigNum}
+	return ShardCleanupArgs{Shard: arg.Shard, ConfigNum: arg.ConfigNum}
 }
 
 type ShardCleanupReply struct {

@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-const Debug = 0
-
 func init() {
 	labgob.Register(JoinArgs{})
 	labgob.Register(LeaveArgs{})
@@ -19,21 +17,14 @@ func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type ShardMaster struct {
-	sync.Mutex
+	mu            sync.Mutex
 	me            int
 	rf            *raft.Raft
 	applyCh       chan raft.ApplyMsg
 	shutdown      chan struct{}
 	configs       []Config                // indexed by config num
-	cache         map[int64]struct{}      // cache processed request, detect duplicate request
+	cache         map[int64]int           // cache processed request, detect duplicate request
 	notifyChanMap map[int]chan notifyArgs // notify RPC handler
 }
 
@@ -56,12 +47,6 @@ func (sm *ShardMaster) getConfig(i int) Config {
 	return dstConfig
 }
 
-func (sm *ShardMaster) makeNotifyCh(index int) chan notifyArgs {
-	notifyCh := make(chan notifyArgs)
-	sm.notifyChanMap[index] = notifyCh
-	return notifyCh
-}
-
 func (sm *ShardMaster) notifyIfPresent(index int, reply notifyArgs) {
 	if ch, ok := sm.notifyChanMap[index]; ok {
 		ch <- reply
@@ -74,15 +59,15 @@ func (sm *ShardMaster) start(arg interface{}) (Err, interface{}) {
 	if !ok {
 		return WrongLeader, struct{}{}
 	}
-	sm.Lock()
+	sm.mu.Lock()
 	notifyCh := make(chan notifyArgs, 1)
 	sm.notifyChanMap[index] = notifyCh
-	sm.Unlock()
+	sm.mu.Unlock()
 	select {
 	case <-time.After(3 * time.Second):
-		sm.Lock()
+		sm.mu.Lock()
 		delete(sm.notifyChanMap, index)
-		sm.Unlock()
+		sm.mu.Unlock()
 		return WrongLeader, struct{}{}
 	case result := <-notifyCh:
 		if result.Term != term {
@@ -95,18 +80,15 @@ func (sm *ShardMaster) start(arg interface{}) (Err, interface{}) {
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
-	err, _ := sm.start(args.copy())
-	reply.Err = err
+	reply.Err, _ = sm.start(args.copy())
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
-	err, _ := sm.start(args.copy())
-	reply.Err = err
+	reply.Err, _ = sm.start(args.copy())
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
-	err, _ := sm.start(args.copy())
-	reply.Err = err
+	reply.Err, _ = sm.start(args.copy())
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -114,17 +96,19 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		reply.Err = WrongLeader
 		return
 	}
-	if args.Num > 0 {
-		sm.Lock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if args.Num > 0 && args.Num < len(sm.configs) {
 		reply.Err, reply.Config = OK, sm.getConfig(args.Num)
-		sm.Unlock()
 		return
 	} else { // args.Num <= 0
+		sm.mu.Unlock()
 		err, config := sm.start(args.copy())
 		reply.Err = err
 		if err == OK {
 			reply.Config = config.(Config)
 		}
+		sm.mu.Lock()
 	}
 }
 
@@ -136,8 +120,7 @@ func (sm *ShardMaster) appendNewConfig(newConfig Config) {
 func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 	reply := notifyArgs{Term: msg.CommandTerm, Args: ""}
 	if arg, ok := msg.Command.(JoinArgs); ok {
-		delete(sm.cache, arg.ExpireRequestId)
-		if _, ok := sm.cache[arg.RequestId]; !ok {
+		if sm.cache[arg.ClientId] < arg.RequestSeq {
 			newConfig := sm.getConfig(-1) // create new configuration based on last configuration
 			newGIDS := make([]int, 0)
 			for gid, server := range arg.Servers {
@@ -151,7 +134,7 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 			if len(newConfig.Groups) == 0 { // no replica group exists
 				newConfig.Shards = [NShards]int{}
 			} else if len(newConfig.Groups) <= NShards {
-				GIDShardsCount := make(map[int]int) // gid -> number of shards it owns
+				shardsByGID := make(map[int]int) // gid -> number of shards it owns
 				var minShardsPerGID, maxShardsPerGID, maxShardsPerGIDCount int
 				minShardsPerGID = NShards / len(newConfig.Groups)
 				if maxShardsPerGIDCount = NShards % len(newConfig.Groups); maxShardsPerGIDCount != 0 {
@@ -163,34 +146,32 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 				for i, j := 0, 0; i < NShards; i++ {
 					gid := newConfig.Shards[i]
 					if gid == 0 ||
-						(minShardsPerGID == maxShardsPerGID && GIDShardsCount[gid] == minShardsPerGID) ||
-						(minShardsPerGID < maxShardsPerGID && GIDShardsCount[gid] == minShardsPerGID && maxShardsPerGIDCount <= 0) {
+						(minShardsPerGID == maxShardsPerGID && shardsByGID[gid] == minShardsPerGID) ||
+						(minShardsPerGID < maxShardsPerGID && shardsByGID[gid] == minShardsPerGID && maxShardsPerGIDCount <= 0) {
 						newGID := newGIDS[j]
 						newConfig.Shards[i] = newGID
-						GIDShardsCount[newGID] += 1
+						shardsByGID[newGID] += 1
 						j = (j + 1) % len(newGIDS)
 					} else {
-						GIDShardsCount[gid] += 1
-						if GIDShardsCount[gid] == minShardsPerGID {
+						shardsByGID[gid] += 1
+						if shardsByGID[gid] == minShardsPerGID {
 							maxShardsPerGIDCount -= 1
 						}
 					}
 				}
 			}
 			DPrintf("[Join] ShardMaster %d append new Join config, newGIDS: %v, config: %v", sm.me, newGIDS, newConfig)
-			sm.cache[arg.RequestId] = struct{}{}
+			sm.cache[arg.ClientId] = arg.RequestSeq
 			sm.appendNewConfig(newConfig)
 		}
 	} else if arg, ok := msg.Command.(LeaveArgs); ok {
-		delete(sm.cache, arg.ExpireRequestId)
-		if _, ok := sm.cache[arg.RequestId]; !ok {
+		if sm.cache[arg.ClientId] < arg.RequestSeq {
 			newConfig := sm.getConfig(-1) // create new configuration
 			leaveGIDs := make(map[int]struct{})
 			for _, gid := range arg.GIDs {
 				delete(newConfig.Groups, gid)
 				leaveGIDs[gid] = struct{}{}
 			}
-
 			if len(newConfig.Groups) == 0 { // remove all gid
 				newConfig.Shards = [NShards]int{}
 			} else {
@@ -202,41 +183,38 @@ func (sm *ShardMaster) apply(msg raft.ApplyMsg) {
 				if shardsPerGID < 1 {
 					shardsPerGID = 1
 				}
-				GIDShardsCount := make(map[int]int)
+				shardsByGID := make(map[int]int)
 			loop:
 				for i, j := 0, 0; i < NShards; i++ {
 					gid := newConfig.Shards[i]
-					if _, ok := leaveGIDs[gid]; ok || GIDShardsCount[gid] == shardsPerGID {
+					if _, ok := leaveGIDs[gid]; ok || shardsByGID[gid] == shardsPerGID {
 						for _, id := range remainingGIDs {
-							count := GIDShardsCount[id]
+							count := shardsByGID[id]
 							if count < shardsPerGID {
 								newConfig.Shards[i] = id
-								GIDShardsCount[id] += 1
+								shardsByGID[id] += 1
 								continue loop
 							}
 						}
 						id := remainingGIDs[j]
 						j = (j + 1) % len(remainingGIDs)
 						newConfig.Shards[i] = id
-						GIDShardsCount[id] += 1
+						shardsByGID[id] += 1
 					} else {
-						GIDShardsCount[gid] += 1
+						shardsByGID[gid] += 1
 					}
 				}
 				DPrintf("[Leave] ShardMaster %d append new Leave config, shardsPerGID: %d, remainingGIDS: %v, config: %v", sm.me, shardsPerGID, remainingGIDs, newConfig)
 			}
-			sm.cache[arg.RequestId] = struct{}{}
+			sm.cache[arg.ClientId] = arg.RequestSeq
 			sm.appendNewConfig(newConfig)
 		}
 	} else if arg, ok := msg.Command.(MoveArgs); ok {
-		delete(sm.cache, arg.ExpireRequestId)
-		if _, ok := sm.cache[arg.RequestId]; !ok {
+		if sm.cache[arg.ClientId] < arg.RequestSeq {
 			newConfig := sm.getConfig(-1)
-			if arg.Shard >= 0 && arg.Shard < NShards {
-				newConfig.Shards[arg.Shard] = arg.GID
-			}
+			newConfig.Shards[arg.Shard] = arg.GID
 			DPrintf("[Move] ShardMaster %d append new Move config: %#v", sm.me, newConfig)
-			sm.cache[arg.RequestId] = struct{}{}
+			sm.cache[arg.ClientId] = arg.RequestSeq
 			sm.appendNewConfig(newConfig)
 		}
 	} else if arg, ok := msg.Command.(QueryArgs); ok {
@@ -250,14 +228,13 @@ func (sm *ShardMaster) run() {
 	for {
 		select {
 		case msg := <-sm.applyCh:
-			sm.Lock()
+			sm.mu.Lock()
 			if msg.CommandValid {
-				DPrintf("%d new msg %#v", sm.me, msg)
 				sm.apply(msg)
 			} else if cmd, ok := msg.Command.(string); ok && cmd == "NewLeader" {
 				sm.rf.Start("")
 			}
-			sm.Unlock()
+			sm.mu.Unlock()
 		case <-sm.shutdown:
 			return
 		}
@@ -290,19 +267,16 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm := new(ShardMaster)
 	sm.me = me
 
-	sm.configs = make([]Config, 1)
 	// First configuration is numbered zero, it contains no groups,
 	// and shards should be assigned to GID zero
+	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
 
-	sm.applyCh = make(chan raft.ApplyMsg)
+	sm.applyCh = make(chan raft.ApplyMsg, 1000)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
-
-	sm.cache = make(map[int64]struct{})
+	sm.cache = make(map[int64]int)
 	sm.notifyChanMap = make(map[int]chan notifyArgs)
 	sm.shutdown = make(chan struct{})
-
 	go sm.run()
-
 	return sm
 }

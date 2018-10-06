@@ -1,36 +1,22 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
-	"bytes"
 	"time"
 )
 
-const Debug = 0
-const StartTimeoutInterval = time.Duration(1500 * time.Millisecond)
+const StartTimeoutInterval = time.Duration(3 * time.Second)
+const SnapshotThreshold = 1.5
 
 func init() {
+	labgob.Register(GetArgs{})
+	labgob.Register(PutAppendArgs{})
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-}
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-// represent an operation
-type Op struct {
-	RequestId,
-	ExpireRequestId int64 // uniquely identifying one request
-	Key   string
-	Value string
-	Op    string
 }
 
 // used to notify RPC handler
@@ -52,7 +38,7 @@ type KVServer struct {
 	shutdown chan struct{}
 
 	data          map[string]string       // storing Key-Value pair
-	cache         map[int64]struct{}      // cache put/append requests that server have processed, use request id as key
+	cache         map[int64]int           // cache put/append requests that server have processed, use request id as key
 	notifyChanMap map[int]chan notifyArgs // use index returned from raft as key
 }
 
@@ -63,8 +49,8 @@ func (kv *KVServer) notifyIfPresent(index int, reply notifyArgs) {
 	}
 }
 
-func (kv *KVServer) start(op Op) (Err, string) {
-	index, term, ok := kv.rf.Start(op)
+func (kv *KVServer) start(args interface{}) (Err, string) {
+	index, term, ok := kv.rf.Start(args)
 	if !ok {
 		return ErrWrongLeader, ""
 	}
@@ -97,7 +83,7 @@ func (kv *KVServer) snapshot(lastCommandIndex int) {
 }
 
 func (kv *KVServer) snapshotIfNeeded(lastCommandIndex int) {
-	var threshold = int(1.5 * float64(kv.maxraftstate))
+	var threshold = int(SnapshotThreshold * float64(kv.maxraftstate))
 	if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= threshold {
 		kv.snapshot(lastCommandIndex)
 	}
@@ -117,11 +103,11 @@ func (kv *KVServer) readSnapshot() {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	reply.Err, reply.Value = kv.start(Op{args.RequestId, args.ExpireRequestId, args.Key, "", "Get"})
+	reply.Err, reply.Value = kv.start(args.copy())
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	reply.Err, _ = kv.start(Op{args.RequestId, args.ExpireRequestId, args.Key, args.Value, args.Op})
+	reply.Err, _ = kv.start(args.copy())
 }
 
 func (kv *KVServer) Kill() {
@@ -130,21 +116,22 @@ func (kv *KVServer) Kill() {
 }
 
 func (kv *KVServer) apply(msg raft.ApplyMsg) {
-	if cmd, ok := msg.Command.(Op); ok {
-		delete(kv.cache, cmd.ExpireRequestId) // delete older request
-		result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
-		if cmd.Op == "Get" {
-			result.Value = kv.data[cmd.Key]
-		} else if _, ok := kv.cache[cmd.RequestId]; !ok { // prevent duplication
-			if cmd.Op == "Put" {
-				kv.data[cmd.Key] = cmd.Value
+	result := notifyArgs{Term: msg.CommandTerm, Value: "", Err: OK}
+	if arg, ok := msg.Command.(GetArgs); ok {
+		result.Value = kv.data[arg.Key]
+	} else if arg, ok := msg.Command.(PutAppendArgs); ok {
+		if kv.cache[arg.ClientId] < arg.RequestSeq {
+			if arg.Op == "Put" {
+				kv.data[arg.Key] = arg.Value
 			} else {
-				kv.data[cmd.Key] += cmd.Value
+				kv.data[arg.Key] += arg.Value
 			}
-			kv.cache[cmd.RequestId] = struct{}{}
+			kv.cache[arg.ClientId] = arg.RequestSeq
 		}
-		kv.notifyIfPresent(msg.CommandIndex, result)
+	} else {
+		result.Err = ErrWrongLeader
 	}
+	kv.notifyIfPresent(msg.CommandIndex, result)
 	kv.snapshotIfNeeded(msg.CommandIndex)
 }
 
@@ -185,21 +172,17 @@ func (kv *KVServer) run() {
 // for any long-running work.
 //
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.persister = persister
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 1000)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.shutdown = make(chan struct{})
 
 	kv.data = make(map[string]string)
-	kv.cache = make(map[int64]struct{})
+	kv.cache = make(map[int64]int)
 	kv.notifyChanMap = make(map[int]chan notifyArgs)
 	go kv.run()
 	return kv

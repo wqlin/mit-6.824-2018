@@ -1,5 +1,7 @@
 package shardmaster
 
+import "log"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -19,6 +21,21 @@ package shardmaster
 
 // The number of shards.
 const NShards = 10
+const (
+	OK          = "OK"
+	WrongLeader = "WrongLeader"
+)
+
+type Err string
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -36,21 +53,14 @@ func (config Config) Copy() Config {
 	return newConfig
 }
 
-const (
-	OK          = "OK"
-	WrongLeader = "WrongLeader"
-)
-
-type Err string
-
 type JoinArgs struct {
-	RequestId       int64
-	ExpireRequestId int64
-	Servers         map[int][]string // new GID -> servers mappings
+	ClientId   int64
+	RequestSeq int
+	Servers    map[int][]string // new GID -> servers mappings
 }
 
 func (arg *JoinArgs) copy() JoinArgs {
-	result := JoinArgs{arg.RequestId, arg.ExpireRequestId, make(map[int][]string)}
+	result := JoinArgs{arg.ClientId, arg.RequestSeq, make(map[int][]string)}
 	for gid, server := range arg.Servers {
 		result.Servers[gid] = append([]string{}, server...)
 	}
@@ -62,13 +72,13 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	RequestId       int64
-	ExpireRequestId int64
-	GIDs            []int
+	ClientId   int64
+	RequestSeq int
+	GIDs       []int
 }
 
 func (arg *LeaveArgs) copy() LeaveArgs {
-	return LeaveArgs{arg.RequestId, arg.ExpireRequestId, append([]int{}, arg.GIDs...)}
+	return LeaveArgs{arg.ClientId, arg.RequestSeq, append([]int{}, arg.GIDs...)}
 }
 
 type LeaveReply struct {
@@ -76,14 +86,14 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	RequestId       int64
-	ExpireRequestId int64
-	Shard           int
-	GID             int
+	ClientId   int64
+	RequestSeq int
+	Shard      int
+	GID        int
 }
 
 func (arg *MoveArgs) copy() MoveArgs {
-	return MoveArgs{arg.RequestId, arg.ExpireRequestId, arg.Shard, arg.GID}
+	return MoveArgs{arg.ClientId, arg.RequestSeq, arg.Shard, arg.GID}
 }
 
 type MoveReply struct {
